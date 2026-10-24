@@ -1,0 +1,381 @@
+const MODES = {
+  mix: 'Мікс (рекомендовано)',
+  flip: 'Картки: слово, потім переклад',
+  choice: 'Вибір перекладу',
+  choiceEn: 'Вибір англійського слова',
+  type: 'Написання англійською',
+};
+// rec: впізнати англійське слово; prod: згадати його з перекладу
+const MODE_DIR = { flip: 'rec', choice: 'rec', choiceEn: 'prod', type: 'prod' };
+
+const Study = {
+  async words({ deckIds, tag = '', scheduled = true, mode = 'mix' }) {
+    const s = await getSettings();
+    const now = Date.now();
+    const all = await DB.all('cards');
+    const cards = all.filter(c => deckIds.includes(c.deckId) && (!tag || (c.tags || []).includes(tag)));
+    const dirs = mode === 'mix' ? ['rec', 'prod'] : [MODE_DIR[mode]];
+    let tasks;
+    if (!scheduled) {
+      tasks = shuffle(cards.flatMap(c => dirs.map(dir => ({ c, dir }))));
+    } else {
+      const due = [], fresh = [], prodNew = [];
+      for (const c of cards) {
+        for (const dir of dirs) {
+          const st = c.srs?.[dir];
+          if (st) { if (st.due <= now) due.push({ c, dir }); }
+          else if (dir === 'prod' && mode === 'mix') { if (c.srs?.rec) prodNew.push({ c, dir }); }
+          else fresh.push({ c, dir });
+        }
+      }
+      const intro = await introducedToday('word', dirs.length === 1 ? dirs[0] : 'rec');
+      due.sort((a, b) => a.c.srs[a.dir].due - b.c.srs[b.dir].due);
+      fresh.sort((a, b) => a.c.createdAt - b.c.createdAt);
+      tasks = shuffle([
+        ...due.slice(0, s.reviewLimit),
+        ...prodNew.slice(0, s.reviewLimit),
+        ...fresh.slice(0, Math.max(0, s.newPerDay - intro)),
+      ]);
+    }
+    if (!tasks.length) {
+      return emptySession(scheduled
+        ? 'На сьогодні все повторено. Нових слів немає або вже вивчено денний ліміт нових слів (його можна змінити в налаштуваннях).'
+        : 'У вибраних словниках немає слів.');
+    }
+    const pool = cards.length >= 4 ? cards : all;
+    runSession({
+      tasks, scheduled,
+      key: t => t.c.id + t.dir,
+      label: t => `<b>${esc(t.c.en)}</b> — ${esc(t.c.ua)}`,
+      render: (t, el, answer) => WordEx[pickWordKind(t, mode)](t, el, answer, pool),
+      apply: async (t, rating) => {
+        const prev = t.c.srs?.[t.dir] || null;
+        t.c.srs = { ...(t.c.srs || {}), [t.dir]: SRS.review(prev, rating, Date.now(), s.retention) };
+        await DB.put('cards', t.c);
+        await logReview('word', t.c.id, t.dir, rating, !prev);
+      },
+    });
+  },
+
+  async grammar({ topicIds, scheduled = true }) {
+    const s = await getSettings();
+    const now = Date.now();
+    const [exs, topics] = await Promise.all([DB.all('exercises'), DB.all('topics')]);
+    const tmap = Object.fromEntries(topics.map(t => [t.id, t]));
+    const list = exs.filter(x => topicIds.includes(x.topicId));
+    let chosen;
+    if (!scheduled) chosen = shuffle(list);
+    else {
+      const due = list.filter(x => x.srs && x.srs.due <= now).sort((a, b) => a.srs.due - b.srs.due);
+      const fresh = list.filter(x => !x.srs).sort((a, b) => a.createdAt - b.createdAt);
+      const intro = await introducedToday('grammar');
+      chosen = shuffle([...due.slice(0, s.reviewLimit), ...fresh.slice(0, Math.max(0, s.newGrammarPerDay - intro))]);
+    }
+    if (!chosen.length) {
+      return emptySession(scheduled ? 'Граматичних вправ на сьогодні немає.' : 'У вибраних темах ще немає вправ.');
+    }
+    runSession({
+      tasks: chosen.map(x => ({ x, topic: tmap[x.topicId] })),
+      scheduled,
+      key: t => t.x.id,
+      label: t => `${esc(t.x.prompt)} → <b>${esc(t.x.answers[0])}</b>`,
+      render: grammarEx,
+      apply: async (t, rating) => {
+        const prev = t.x.srs;
+        t.x.srs = SRS.review(prev, rating, Date.now(), s.retention);
+        await DB.put('exercises', t.x);
+        await logReview('grammar', t.x.id, null, rating, !prev);
+      },
+    });
+  },
+};
+
+function emptySession(msg) {
+  app().innerHTML = `<div class="panel center"><h2>Немає що вчити</h2><p>${esc(msg)}</p><div class="btns center"><a class="btn" href="#/">На головну</a><a class="btn" href="#/study">Вибрати інші словники</a></div></div>`;
+}
+
+function runSession(cfg) {
+  const queue = [...cfg.tasks];
+  const total = queue.length;
+  const firstTry = new Map();
+  const wrong = new Map();
+  let done = 0;
+
+  const step = () => {
+    document.onkeydown = null;
+    if (!queue.length) return finish();
+    const t = queue.shift();
+    app().innerHTML = `<div class="session">
+      <div class="session-head">
+        <button class="btn ghost small" data-act="quit">Завершити</button>
+        <div class="bar"><div style="width:${Math.round(done / total * 100)}%"></div></div>
+        <span class="muted">${done} / ${total}${cfg.scheduled ? '' : ' · без розкладу'}</span>
+      </div>
+      <div id="ex"></div></div>`;
+    actions.quit = finish;
+    let answered = false;
+    cfg.render(t, $('#ex'), async rating => {
+      if (answered) return;
+      answered = true;
+      const k = cfg.key(t);
+      if (!firstTry.has(k)) firstTry.set(k, rating > 1);
+      if (cfg.scheduled) await cfg.apply(t, rating);
+      if (rating === 1) {
+        wrong.set(k, t);
+        queue.splice(Math.min(queue.length, 3 + Math.floor(Math.random() * 3)), 0, t);
+      } else done++;
+      step();
+    });
+  };
+
+  const finish = () => {
+    document.onkeydown = null;
+    const n = firstTry.size;
+    if (!n) { location.hash = '#/'; render(); return; }
+    const ok = [...firstTry.values()].filter(Boolean).length;
+    app().innerHTML = `<div class="panel center">
+      <h2>Готово</h2>
+      <p>З першої спроби правильно: <b>${ok}</b> з ${n}.</p>
+      ${wrong.size ? `<h3>Були помилки</h3><ul class="wrong-list">${[...wrong.values()].map(t => `<li>${cfg.label(t)}</li>`).join('')}</ul>` : ''}
+      <div class="btns center">
+        ${wrong.size ? '<button class="btn primary" data-act="retry">Ще раз ці помилки</button>' : ''}
+        <a class="btn" href="#/">На головну</a>
+      </div></div>`;
+    actions.retry = () => runSession({ ...cfg, tasks: shuffle([...wrong.values()]), scheduled: false });
+  };
+
+  step();
+}
+
+function pickWordKind(t, mode) {
+  if (mode !== 'mix') return mode;
+  if (t.dir === 'rec') return !t.c.srs?.rec || Math.random() < 0.5 ? 'flip' : 'choice';
+  return !t.c.srs?.prod || Math.random() < 0.4 ? 'choiceEn' : 'type';
+}
+
+const rateButtons = () => `<div class="rate">
+  <button class="btn r1" data-r="1">Не знаю <kbd>1</kbd></button>
+  <button class="btn r2" data-r="2">Важко <kbd>2</kbd></button>
+  <button class="btn r3" data-r="3">Знаю <kbd>3</kbd></button>
+  <button class="btn r4" data-r="4">Легко <kbd>4</kbd></button></div>`;
+
+const feedback = (state, html) => {
+  const title = { ok: 'Правильно', close: 'Майже', bad: 'Неправильно' }[state];
+  return `<div class="feedback ${state}"><b>${title}.</b> ${html}</div>`;
+};
+
+function distractors(c, pool, field) {
+  const seen = new Set([norm(c[field])]);
+  const out = [];
+  const same = shuffle(pool.filter(x => x.deckId === c.deckId));
+  const other = shuffle(pool.filter(x => x.deckId !== c.deckId));
+  for (const x of [...same, ...other]) {
+    const k = norm(x[field]);
+    if (!k || seen.has(k)) continue;
+    seen.add(k);
+    out.push(x[field]);
+    if (out.length === 3) break;
+  }
+  return out;
+}
+
+// Ховає саме слово в прикладі, щоб приклад був підказкою, а не відповіддю.
+function blankOut(example, en) {
+  if (!example) return '';
+  const words = String(en).replace(/\([^)]*\)/g, ' ').split(/[\s\/,;]+/)
+    .filter(w => w.length > 2 && !/^(to|the|and|sth|smb|someone|something)$/i.test(w));
+  let out = example;
+  for (const w of words) {
+    const root = w.length > 4 ? w.slice(0, w.length - 2) : w.slice(0, 3);
+    out = out.replace(new RegExp('\\b' + escRe(root) + "[\\w']*", 'gi'), '____');
+  }
+  return out;
+}
+
+function checkWord(given, en) {
+  const a = norm(given).replace(/^to /, '');
+  const vs = variants(en);
+  if (vs.includes(a)) return 'ok';
+  if (a.length >= 3 && vs.some(v => v.length >= 4 && lev(a, v) <= (v.length >= 8 ? 2 : 1))) return 'close';
+  return 'wrong';
+}
+
+function bindSay(el) {
+  $$('[data-say]', el).forEach(b => { b.onclick = e => { e.stopPropagation(); speak(b.dataset.say); }; });
+}
+
+function choiceEx(t, el, answer, pool, from, to, label) {
+  const c = t.c;
+  const correct = c[to];
+  const opts = shuffle([correct, ...distractors(c, pool, to)]);
+  if (opts.length < 2) return WordEx.flip(t, el, answer);
+  el.innerHTML = `<div class="ex-card">
+      <div class="ex-label">${label}</div>
+      <div class="ex-word">${esc(c[from])} ${from === 'en' ? sayBtn(c.en) : ''}</div>
+      ${from === 'en' && c.example ? `<div class="ex-example">${esc(c.example)}</div>` : ''}
+    </div>
+    <div class="options">${opts.map((o, i) => `<button class="btn option" data-i="${i}"><kbd>${i + 1}</kbd> ${esc(o)}</button>`).join('')}</div>
+    <div id="after"></div>`;
+  bindSay(el);
+  let rating = null;
+  const pick = i => {
+    if (rating !== null) return;
+    const ok = norm(opts[i]) === norm(correct);
+    rating = ok ? 3 : 1;
+    $$('.option', el).forEach((b, j) => {
+      b.disabled = true;
+      if (norm(opts[j]) === norm(correct)) b.classList.add('correct');
+      else if (j === i) b.classList.add('wrong');
+    });
+    $('#after').innerHTML = `${feedback(ok ? 'ok' : 'bad', `${esc(c.en)} — ${esc(c.ua)} ${sayBtn(c.en)}`)}
+      ${c.example && from !== 'en' ? `<div class="ex-example">${esc(c.example)}</div>` : ''}
+      <div class="ex-actions"><button class="btn primary" id="next">Далі <kbd>Enter</kbd></button></div>`;
+    bindSay($('#after'));
+    $('#next').onclick = () => answer(rating);
+    $('#next').focus();
+  };
+  $$('.option', el).forEach((b, i) => { b.onclick = () => pick(i); });
+  document.onkeydown = e => {
+    if (rating === null && e.key >= '1' && e.key <= String(opts.length)) pick(+e.key - 1);
+    else if (rating !== null && e.key === 'Enter') { e.preventDefault(); answer(rating); }
+  };
+}
+
+const WordEx = {
+  flip(t, el, answer) {
+    const c = t.c;
+    el.innerHTML = `<div class="ex-card">
+        <div class="ex-label">Що означає?</div>
+        <div class="ex-word">${esc(c.en)} ${sayBtn(c.en)}</div>
+        ${c.example ? `<div class="ex-example">${esc(c.example)}</div>` : ''}
+        <div id="back" hidden>
+          <div class="ex-answer">${esc(c.ua)}</div>
+          ${c.note ? `<div class="ex-note">${esc(c.note)}</div>` : ''}
+        </div>
+      </div>
+      <div class="ex-actions" id="acts"><button class="btn primary big" id="show">Показати переклад <kbd>Пробіл</kbd></button></div>`;
+    bindSay(el);
+    const revealed = () => !$('#back').hidden;
+    const reveal = () => {
+      $('#back').hidden = false;
+      $('#acts').innerHTML = rateButtons();
+      $$('[data-r]', el).forEach(b => { b.onclick = () => answer(+b.dataset.r); });
+    };
+    $('#show').onclick = reveal;
+    document.onkeydown = e => {
+      if (e.key === ' ' || e.key === 'Enter') { e.preventDefault(); revealed() ? answer(3) : reveal(); }
+      else if (revealed() && '1234'.includes(e.key)) answer(+e.key);
+    };
+  },
+
+  choice(t, el, answer, pool) { choiceEx(t, el, answer, pool, 'en', 'ua', 'Виберіть переклад'); },
+  choiceEn(t, el, answer, pool) { choiceEx(t, el, answer, pool, 'ua', 'en', 'Виберіть англійське слово'); },
+
+  type(t, el, answer) {
+    const c = t.c;
+    const hint = blankOut(c.example, c.en);
+    el.innerHTML = `<div class="ex-card">
+        <div class="ex-label">Напишіть англійською</div>
+        <div class="ex-word">${esc(c.ua)}</div>
+        ${hint ? `<div class="ex-example">${esc(hint)}</div>` : ''}
+      </div>
+      <form id="tf" class="type-form">
+        <input id="ti" autocomplete="off" autocapitalize="off" spellcheck="false" placeholder="Відповідь">
+        <button class="btn primary">Перевірити</button>
+      </form>
+      <div class="ex-actions" id="giveupWrap"><button type="button" class="btn ghost small" id="giveup">Не пам'ятаю</button></div>
+      <div id="after"></div>`;
+    $('#ti').focus();
+    let result = null;
+    const check = given => {
+      const r = given === null ? 'wrong' : checkWord(given, c.en);
+      result = r === 'ok' ? 3 : r === 'close' ? 2 : 1;
+      $('#ti').disabled = true;
+      $('#tf button').disabled = true;
+      $('#giveupWrap').remove();
+      const msg = r === 'ok' ? `${esc(c.en)} ${sayBtn(c.en)}` : `Правильно: <b>${esc(c.en)}</b> ${sayBtn(c.en)}`;
+      $('#after').innerHTML = `${feedback(r === 'ok' ? 'ok' : r === 'close' ? 'close' : 'bad', msg)}
+        ${c.example ? `<div class="ex-example">${esc(c.example)}</div>` : ''}
+        <div class="ex-actions">
+          ${r !== 'ok' && given ? '<button class="btn ghost" id="accept">Зарахувати як правильну</button>' : ''}
+          <button class="btn primary" id="next">Далі <kbd>Enter</kbd></button>
+        </div>`;
+      bindSay($('#after'));
+      $('#next').onclick = () => answer(result);
+      if ($('#accept')) $('#accept').onclick = () => answer(3);
+      setTimeout(() => $('#next')?.focus());
+    };
+    $('#tf').onsubmit = e => {
+      e.preventDefault();
+      const v = $('#ti').value;
+      if (result === null && v.trim()) check(v);
+    };
+    $('#giveup').onclick = () => { if (result === null) check(null); };
+    document.onkeydown = e => {
+      if (result !== null && e.key === 'Enter') { e.preventDefault(); answer(result); }
+    };
+  },
+};
+
+function grammarEx(t, el, answer) {
+  const x = t.x, topic = t.topic;
+  const sentence = esc(x.prompt).replace(/_{2,}/g, '<span class="gap">____</span>');
+  const isChoice = x.kind === 'gap' && x.options.length >= 2;
+  const opts = isChoice ? shuffle(x.options) : [];
+  const task = x.kind === 'translate' ? 'Перекладіть англійською' : isChoice ? 'Виберіть правильний варіант' : 'Заповніть пропуск';
+  el.innerHTML = `<div class="ex-card">
+      <div class="ex-label">${esc(topic?.name || '')} · ${task}</div>
+      <div class="ex-sentence">${sentence}</div>
+    </div>
+    ${isChoice
+      ? `<div class="options">${opts.map((o, i) => `<button class="btn option" data-i="${i}"><kbd>${i + 1}</kbd> ${esc(o)}</button>`).join('')}</div>`
+      : `<form id="tf" class="type-form"><input id="ti" autocomplete="off" autocapitalize="off" spellcheck="false" placeholder="Відповідь"><button class="btn primary">Перевірити</button></form>`}
+    <div id="after"></div>
+    ${topic?.content ? `<details class="rule"><summary>Правило: ${esc(topic.name)}</summary><div class="md">${md(topic.content)}</div></details>` : ''}`;
+  const accepted = x.answers.map(norm);
+  let result = null;
+  const show = ok => {
+    result = ok ? 3 : 1;
+    const ref = x.answers.map(esc).join(' / ');
+    const info = ok ? (x.kind === 'translate' && x.answers.length > 1 ? `Варіанти: ${ref}` : '') : `Правильно: <b>${ref}</b>`;
+    $('#after').innerHTML = `${feedback(ok ? 'ok' : 'bad', info)}
+      ${x.explanation ? `<div class="ex-note">${esc(x.explanation)}</div>` : ''}
+      <div class="ex-actions">
+        ${!ok && !isChoice ? '<button class="btn ghost" id="accept">Моя відповідь теж правильна</button>' : ''}
+        <button class="btn primary" id="next">Далі <kbd>Enter</kbd></button>
+      </div>`;
+    $('#next').onclick = () => answer(result);
+    if ($('#accept')) $('#accept').onclick = () => answer(3);
+    setTimeout(() => $('#next')?.focus());
+  };
+  if (isChoice) {
+    const pick = i => {
+      if (result !== null) return;
+      const ok = accepted.includes(norm(opts[i]));
+      $$('.option', el).forEach((b, j) => {
+        b.disabled = true;
+        if (accepted.includes(norm(opts[j]))) b.classList.add('correct');
+        else if (j === i) b.classList.add('wrong');
+      });
+      show(ok);
+    };
+    $$('.option', el).forEach((b, i) => { b.onclick = () => pick(i); });
+    document.onkeydown = e => {
+      if (result === null && e.key >= '1' && e.key <= String(opts.length)) pick(+e.key - 1);
+      else if (result !== null && e.key === 'Enter') { e.preventDefault(); answer(result); }
+    };
+  } else {
+    $('#ti').focus();
+    $('#tf').onsubmit = e => {
+      e.preventDefault();
+      const v = $('#ti').value;
+      if (result !== null || !v.trim()) return;
+      $('#ti').disabled = true;
+      $('#tf button').disabled = true;
+      show(accepted.includes(norm(v)));
+    };
+    document.onkeydown = e => {
+      if (result !== null && e.key === 'Enter') { e.preventDefault(); answer(result); }
+    };
+  }
+}
