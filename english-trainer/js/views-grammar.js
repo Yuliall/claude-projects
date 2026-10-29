@@ -99,13 +99,16 @@ Views.grammar = async () => {
     const p = per[x.topicId] ||= { n: 0, due: 0, fresh: 0 };
     p.n++;
     if (!x.srs) p.fresh++;
-    else if (x.srs.due <= now) p.due++;
+    else if (SRS.isDue(x.srs, now)) p.due++;
   }
   const names = new Set(topics.map(t => norm(t.name)));
   const missingStarter = STARTER_TOPICS.some(s => !names.has(norm(s.name)));
   app().innerHTML = `
     <div class="page-head"><h1>Граматика</h1>
-      <div class="btns"><button class="btn primary" data-act="review" ${exercises.length ? '' : 'disabled'}>Повторити за розкладом</button></div>
+      <div class="btns">
+        <button class="btn primary" data-act="review" ${exercises.length ? '' : 'disabled'}>Повторити за розкладом</button>
+        <button class="btn" data-act="nextEx" ${exercises.some(x => !x.srs) ? '' : 'disabled'}>Наступні нові вправи</button>
+      </div>
     </div>
     <form class="panel row-form" id="newTopic">
       <input name="name" placeholder="Нова тема, напр. «Present Simple vs Continuous»" required>
@@ -130,7 +133,8 @@ Views.grammar = async () => {
     location.hash = '#/topic/' + t.id;
   };
   actions.starter = async () => { const n = await addStarterTopics(); toast(`Додано тем: ${n}`); render(); };
-  actions.review = () => Study.grammar({ topicIds: topics.map(t => t.id), scheduled: true });
+  actions.review = () => Study.grammar({ topicIds: topics.map(t => t.id), set: 'scheduled' });
+  actions.nextEx = () => Study.grammar({ topicIds: topics.map(t => t.id), set: 'next' });
 };
 
 function exercisesPrompt(topic, n, level) {
@@ -195,6 +199,7 @@ Views.topic = async id => {
       <div><a href="#/grammar" class="crumb">Граматика${topic.folder ? ' / ' + esc(topic.folder) : ''}</a><h1>${esc(topic.name)}</h1></div>
       <div class="btns">
         <button class="btn primary" data-act="review" ${exercises.length ? '' : 'disabled'}>Повторити</button>
+        <button class="btn" data-act="nextEx" ${exercises.some(x => !x.srs) ? '' : 'disabled'}>Нові вправи</button>
         <button class="btn" data-act="practice" ${exercises.length ? '' : 'disabled'}>Пройти всі вправи</button>
         <button class="btn ghost" data-act="editTopic">Назва і папка</button>
       </div>
@@ -228,8 +233,9 @@ Views.topic = async id => {
       <div class="btns"><button class="btn primary" data-act="importEx">Додати вправи</button></div>
     </div>`;
 
-  actions.review = () => Study.grammar({ topicIds: [id], scheduled: true });
-  actions.practice = () => Study.grammar({ topicIds: [id], scheduled: false });
+  actions.review = () => Study.grammar({ topicIds: [id], set: 'scheduled' });
+  actions.nextEx = () => Study.grammar({ topicIds: [id], set: 'next' });
+  actions.practice = () => Study.grammar({ topicIds: [id], set: 'all' });
   actions.toggleRule = () => { $('#ruleEdit').hidden = !$('#ruleEdit').hidden; $('#ruleView').hidden = !$('#ruleEdit').hidden; };
   actions.saveRule = async () => { topic.content = $('#ruleText').value; await DB.put('topics', topic); render(); };
   actions.addEx = () => exerciseModal({ topicId: id, kind: 'gap', prompt: '', answers: [], options: [], explanation: '', id: uid(), createdAt: Date.now(), srs: null }, { onSave: render });

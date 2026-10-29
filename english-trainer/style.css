@@ -163,6 +163,8 @@ table.pick tr.dup { opacity: .7; }
 .tag { font-size: .75rem; background: var(--accent-soft); border-radius: 4px; padding: 1px 6px; }
 .badge { display: inline-block; font-size: .78rem; padding: 2px 8px; border-radius: 99px; background: var(--accent-soft); white-space: nowrap; }
 .badge.new { background: var(--border); }
+td.state .badge { display: block; width: fit-content; margin-bottom: 3px; }
+input.num { width: 72px; padding: 3px 6px; }
 .badge.learning { background: var(--warn-soft); color: var(--warn); }
 .badge.young { background: var(--accent-soft); color: var(--accent); }
 .badge.known { background: var(--ok-soft); color: var(--ok); }

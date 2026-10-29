@@ -1,30 +1,17 @@
-function wordStats(cards, now) {
-  const r = { total: cards.length, fresh: 0, dueRec: 0, dueProd: 0, prodReady: 0, known: 0 };
-  for (const c of cards) {
-    const rec = c.srs?.rec, prod = c.srs?.prod;
-    if (!rec) r.fresh++;
-    else {
-      if (rec.due <= now) r.dueRec++;
-      if (rec.s >= 21) r.known++;
-    }
-    if (prod) { if (prod.due <= now) r.dueProd++; }
-    else if (rec) r.prodReady++;
-  }
-  return r;
-}
-
 Views[''] = async () => {
-  const [decks, cards, exercises, topics, s, lastExport] = await Promise.all([
-    DB.all('decks'), DB.all('cards'), DB.all('exercises'), DB.all('topics'), getSettings(), metaGet('lastExport'),
+  const [decks, cards, exercises, topics, lastExport, ctx] = await Promise.all([
+    DB.all('decks'), DB.all('cards'), DB.all('exercises'), DB.all('topics'), metaGet('lastExport'), wordContext(),
   ]);
-  const now = Date.now();
-  const w = wordStats(cards, now);
-  const newToday = Math.min(w.fresh, Math.max(0, s.newPerDay - await introducedToday('word', 'rec')));
-  const reviewsToday = Math.min(s.reviewLimit, w.dueRec + w.dueProd) + Math.min(s.reviewLimit, w.prodReady);
-  const wordsTotal = reviewsToday + newToday;
-  const gDue = exercises.filter(x => x.srs && x.srs.due <= now).length;
-  const gFresh = exercises.filter(x => !x.srs).length;
-  const gTotal = Math.min(s.reviewLimit, gDue) + Math.min(gFresh, Math.max(0, s.newGrammarPerDay - await introducedToday('grammar')));
+  const { s, now } = ctx;
+  const sched = wordTasks(cards, { ...ctx, set: 'scheduled', mode: 'mix' });
+  const schedNew = sched.filter(t => t.dir === 'rec' && !t.c.srs?.rec).length;
+  const schedWrite = sched.filter(t => t.dir === 'prod' && !t.c.srs?.prod).length;
+  const schedReview = sched.length - schedNew - schedWrite;
+  const todayN = cards.filter(c => isToday(c, ctx.todayIds)).length;
+  const learningN = cards.filter(c => c.srs?.rec?.learning || c.srs?.prod?.learning).length;
+  const freshN = cards.filter(isFresh).length;
+  const known = cards.filter(c => c.srs?.rec && !c.srs.rec.learning && c.srs.rec.s >= 21).length;
+  const gTotal = grammarTasks(exercises, { set: 'scheduled', s, now, introG: await introducedToday('grammar') }).length;
   const doneToday = (await DB.since('log', 'ts', startOfDay())).length;
   const staleBackup = cards.length >= 10 && (!lastExport || now - lastExport > 7 * DAY);
 
@@ -32,17 +19,29 @@ Views[''] = async () => {
     <section class="hero panel">
       <div>
         <h1>Сьогодні</h1>
-        <p class="muted">${wordsTotal ? `Повторень: ${reviewsToday}, нових слів: ${newToday}.` : cards.length ? 'Слова на сьогодні повторено.' : 'Почніть з нового уроку або створіть словник.'}</p>
+        <p class="muted">${cards.length
+          ? `За розкладом: повторень ${schedReview}, нових слів ${schedNew}, перше написання ${schedWrite}.${learningN ? ` На етапі «вчу»: ${learningN} сл.` : ''}`
+          : 'Почніть з нового уроку або створіть словник.'}</p>
       </div>
       <div class="btns">
-        <button class="btn primary big" data-act="words" ${wordsTotal ? '' : 'disabled'}>Слова: ${wordsTotal}</button>
+        <button class="btn primary big" data-act="words" ${sched.length ? '' : 'disabled'}>Слова: ${sched.length}</button>
         <button class="btn big" data-act="grammar" ${gTotal ? '' : 'disabled'}>Граматика: ${gTotal}</button>
       </div>
     </section>
+    ${todayN || freshN ? `<div class="panel">
+      <div class="toolbar">
+        <h3>Сьогоднішні слова</h3>
+      </div>
+      <p class="muted">Слова, які почала вчити сьогодні або ще вчиш. Їх можна проходити скільки завгодно разів: картками, вибором, написанням.</p>
+      <div class="btns">
+        <button class="btn" data-act="today" ${todayN ? '' : 'disabled'}>Повторити сьогоднішні: ${todayN}</button>
+        <a class="btn" href="#/study">Вибрати спосіб</a>
+        ${freshN ? `<button class="btn" data-act="next">Взяти наступні ${Math.min(freshN, s.newPerDay)} нових</button>` : ''}
+      </div></div>` : ''}
     ${staleBackup ? `<div class="panel warn-panel">Резервну копію ${lastExport ? 'не робили понад тиждень' : 'ще не робили'}. Дані зберігаються лише в цьому браузері. <a href="#/settings">Зберегти копію</a></div>` : ''}
     <div class="stats">
       <div class="stat"><b>${cards.length}</b><span>слів у ${decks.length} словниках</span></div>
-      <div class="stat"><b>${w.known}</b><span>слів знаю добре</span></div>
+      <div class="stat"><b>${known}</b><span>слів знаю добре</span></div>
       <div class="stat"><b>${topics.length}</b><span>граматичних тем</span></div>
       <div class="stat"><b>${doneToday}</b><span>відповідей сьогодні</span></div>
     </div>
@@ -56,8 +55,11 @@ Views[''] = async () => {
       </ol></div>` : ''}
     <div class="btns"><a class="btn" href="#/lesson">Новий урок</a><a class="btn" href="#/study">Вибрати словники для тренування</a></div>`;
 
-  actions.words = () => Study.words({ deckIds: decks.map(d => d.id), scheduled: true, mode: 'mix' });
-  actions.grammar = () => Study.grammar({ topicIds: topics.map(t => t.id), scheduled: true });
+  const deckIds = decks.map(d => d.id);
+  actions.words = () => Study.words({ deckIds, set: 'scheduled', mode: 'mix' });
+  actions.today = () => Study.words({ deckIds, set: 'today', mode: 'mix' });
+  actions.next = () => Study.words({ deckIds, set: 'next', mode: 'mix' });
+  actions.grammar = () => Study.grammar({ topicIds: topics.map(t => t.id), set: 'scheduled' });
 };
 
 function folderDatalist(items, id = 'folders') {
@@ -78,7 +80,7 @@ Views.decks = async () => {
     const p = per[c.deckId] ||= { n: 0, due: 0, fresh: 0 };
     p.n++;
     if (!c.srs?.rec) p.fresh++;
-    else if (c.srs.rec.due <= now || (c.srs.prod && c.srs.prod.due <= now)) p.due++;
+    else if (SRS.isDue(c.srs.rec, now) || SRS.isDue(c.srs.prod, now)) p.due++;
   }
   const byId = Object.fromEntries(decks.map(d => [d.id, d]));
   app().innerHTML = `
@@ -247,12 +249,12 @@ Views.deck = async id => {
     const list = cards.filter(c => (!q || norm(c.en).includes(q) || norm(c.ua).includes(q)) && (!t || (c.tags || []).includes(t)));
     $('#count').textContent = `${list.length} з ${cards.length}`;
     $('#rows').innerHTML = list.map(c => {
-      const l = SRS.label(c.srs?.rec);
+      const rec = SRS.label(c.srs?.rec), prod = SRS.label(c.srs?.prod);
       return `<tr>
         <td class="cb"><input type="checkbox" data-sel="${c.id}" ${sel.has(c.id) ? 'checked' : ''}></td>
         <td><b>${esc(c.en)}</b>${c.example ? `<div class="ex">${esc(c.example)}</div>` : ''}</td>
         <td>${esc(c.ua)}${c.note ? `<div class="ex">${esc(c.note)}</div>` : ''}${c.tags?.length ? `<div class="tags">${c.tags.map(x => `<span class="tag">${esc(x)}</span>`).join('')}</div>` : ''}</td>
-        <td><span class="badge ${l.cls}">${l.text}</span></td>
+        <td class="state"><span class="badge ${rec.cls}" title="Впізнаю слово">переклад: ${rec.text}</span><span class="badge ${prod.cls}" title="Пишу слово сама">написання: ${prod.text}</span></td>
         <td class="right"><button class="btn small ghost" data-act="edit" data-id="${c.id}">Змінити</button></td>
       </tr>`;
     }).join('') || '<tr><td colspan="5" class="muted">Слів поки немає.</td></tr>';
@@ -336,7 +338,7 @@ Views.deck = async id => {
     await DB.putMany('cards', list);
     render();
   };
-  actions.practiceAll = () => Study.words({ deckIds: [id], scheduled: false, mode: 'mix' });
+  actions.practiceAll = () => Study.words({ deckIds: [id], set: 'all', mode: 'mix' });
   actions.saveSource = async () => { deck.source = $('#source').value; await DB.put('decks', deck); toast('Збережено'); };
   actions.editDeck = () => {
     const m = modal(`<h3>Словник</h3>
@@ -550,7 +552,7 @@ function renderPick(data, { decks, topics, allCards }) {
 }
 
 Views.study = async preId => {
-  const [decks, cards] = await Promise.all([DB.all('decks'), DB.all('cards')]);
+  const [decks, cards, ctx] = await Promise.all([DB.all('decks'), DB.all('cards'), wordContext()]);
   if (!decks.length) { app().innerHTML = '<div class="panel">Спочатку створіть словник. <a href="#/lesson">Новий урок</a></div>'; return; }
   const count = Object.fromEntries(decks.map(d => [d.id, 0]));
   cards.forEach(c => { if (count[c.deckId] !== undefined) count[c.deckId]++; });
@@ -566,23 +568,38 @@ Views.study = async preId => {
       ${tags.length ? `<label>Лише з тегом <select id="tag"><option value="">будь-який</option>${tags.map(t => `<option>${esc(t)}</option>`).join('')}</select></label>` : ''}
     </div>
     <div class="panel stack">
+      <h3>Які слова</h3>
+      ${Object.entries(WORD_SETS).map(([k, v], i) => `<label class="check"><input type="radio" name="set" value="${k}" ${i === 0 ? 'checked' : ''}> ${v}${k === 'next' ? ` <input type="number" id="nextCount" min="1" max="500" value="${ctx.s.newPerDay}" class="num">` : ''} <span class="muted" data-count="${k}"></span></label>`).join('')}
       <h3>Як вчити</h3>
       ${Object.entries(MODES).map(([k, v], i) => `<label class="check"><input type="radio" name="mode" value="${k}" ${i === 0 ? 'checked' : ''}> ${v}</label>`).join('')}
-      <h3>Які слова</h3>
-      <label class="check"><input type="radio" name="sched" value="1" checked> За розкладом: ті, що пора повторити, і нові</label>
-      <label class="check"><input type="radio" name="sched" value="0"> Усі слова підряд (розклад не змінюється)</label>
+      <p class="muted">Картки і вибір перекладу тренують впізнавання слова, вибір англійського слова і написання тренують уміння згадати його. Прогрес для цих двох умінь рахується окремо, мікс тренує обидва.</p>
     </div>
     <div class="btns"><button class="btn primary big" data-act="start">Почати</button></div>`;
-  actions.all = () => $$('.sd').forEach(cb => { cb.checked = true; });
-  actions.none = () => $$('.sd').forEach(cb => { cb.checked = false; });
+
+  const params = () => ({
+    deckIds: $$('.sd:checked').map(cb => cb.value),
+    tag: $('#tag')?.value || '',
+    mode: $('input[name=mode]:checked').value,
+    set: $('input[name=set]:checked').value,
+    count: Math.max(1, +$('#nextCount').value || ctx.s.newPerDay),
+  });
+  const updateCounts = () => {
+    const p = params();
+    const chosen = cards.filter(c => p.deckIds.includes(c.deckId) && (!p.tag || (c.tags || []).includes(p.tag)));
+    for (const set of Object.keys(WORD_SETS)) {
+      const n = wordTasks(chosen, { ...ctx, set, mode: p.mode, count: p.count }).length;
+      $(`[data-count="${set}"]`).textContent = `(${n} ${n === 1 ? 'завдання' : 'завдань'})`;
+    }
+  };
+  app().onchange = updateCounts;
+  $('#nextCount').oninput = updateCounts;
+  updateCounts();
+
+  actions.all = () => { $$('.sd').forEach(cb => { cb.checked = true; }); updateCounts(); };
+  actions.none = () => { $$('.sd').forEach(cb => { cb.checked = false; }); updateCounts(); };
   actions.start = () => {
-    const deckIds = $$('.sd:checked').map(cb => cb.value);
-    if (!deckIds.length) { toast('Виберіть хоча б один словник'); return; }
-    Study.words({
-      deckIds,
-      tag: $('#tag')?.value || '',
-      mode: $('input[name=mode]:checked').value,
-      scheduled: $('input[name=sched]:checked').value === '1',
-    });
+    const p = params();
+    if (!p.deckIds.length) { toast('Виберіть хоча б один словник'); return; }
+    Study.words(p);
   };
 };
