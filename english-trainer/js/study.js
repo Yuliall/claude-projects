@@ -8,76 +8,132 @@ const MODES = {
 // rec: впізнати англійське слово; prod: згадати його з перекладу
 const MODE_DIR = { flip: 'rec', choice: 'rec', choiceEn: 'prod', type: 'prod' };
 
+// Набори слів для тренування:
+// scheduled — ті, що пора повторити, плюс нові в межах денного ліміту;
+// today — почала вчити сьогодні або ще на етапі «вчу»: їх можна проходити скільки завгодно разів і різними способами;
+// next — наступні нові слова понад денний ліміт;
+// all — усі підряд, без зміни розкладу.
+const WORD_SETS = {
+  scheduled: 'За розкладом: повторення і нові',
+  today: 'Сьогоднішні слова і ті, що ще вчу',
+  next: 'Наступні нові слова',
+  all: 'Усі слова підряд (розклад не змінюється)',
+};
+
+async function wordContext() {
+  const s = await getSettings();
+  const logs = await DB.since('log', 'ts', startOfDay());
+  const first = logs.filter(l => l.type === 'word' && l.first);
+  return {
+    s, now: Date.now(),
+    todayIds: new Set(first.map(l => l.itemId)),
+    intro: { rec: first.filter(l => l.dir === 'rec').length, prod: first.filter(l => l.dir === 'prod').length },
+  };
+}
+
+const isToday = (c, todayIds) => todayIds.has(c.id) || c.srs?.rec?.learning || c.srs?.prod?.learning;
+const isFresh = c => !c.srs?.rec && !c.srs?.prod;
+
+function wordTasks(cards, { set, mode, s, now, todayIds, intro, count }) {
+  const dirs = mode === 'mix' ? ['rec', 'prod'] : [MODE_DIR[mode]];
+  const expand = list => list.flatMap(c => dirs.map(dir => ({ c, dir })));
+  // У міксі спершу впізнавання, потім написання, щоб не писати слово, якого ще не бачила.
+  const order = list => mode === 'mix'
+    ? [...shuffle(list.filter(t => t.dir === 'rec')), ...shuffle(list.filter(t => t.dir === 'prod'))]
+    : shuffle(list);
+  if (set === 'all') return order(expand(cards));
+  if (set === 'today') return order(expand(cards.filter(c => isToday(c, todayIds))));
+  if (set === 'next') {
+    return order(expand(cards.filter(isFresh).sort((a, b) => a.createdAt - b.createdAt).slice(0, count || s.newPerDay)));
+  }
+  const due = [], fresh = [], prodNew = [];
+  for (const c of cards) {
+    for (const dir of dirs) {
+      const st = c.srs?.[dir];
+      if (st) { if (SRS.isDue(st, now)) due.push({ c, dir }); }
+      else if (dir === 'prod' && mode === 'mix') { if (c.srs?.rec && !c.srs.rec.learning) prodNew.push({ c, dir }); }
+      else fresh.push({ c, dir });
+    }
+  }
+  const newLeft = Math.max(0, s.newPerDay - intro[dirs.length === 1 ? dirs[0] : 'rec']);
+  due.sort((a, b) => a.c.srs[a.dir].due - b.c.srs[b.dir].due);
+  fresh.sort((a, b) => a.c.createdAt - b.c.createdAt);
+  return order([...due.slice(0, s.reviewLimit), ...prodNew.slice(0, s.reviewLimit), ...fresh.slice(0, newLeft)]);
+}
+
+const GRAMMAR_SETS = {
+  scheduled: 'За розкладом',
+  next: 'Наступні нові вправи',
+  all: 'Усі вправи підряд (розклад не змінюється)',
+};
+
+function grammarTasks(list, { set, s, now, introG }) {
+  if (set === 'all') return shuffle(list);
+  const fresh = list.filter(x => !x.srs).sort((a, b) => a.createdAt - b.createdAt);
+  if (set === 'next') return shuffle(fresh.slice(0, s.newGrammarPerDay));
+  const due = list.filter(x => SRS.isDue(x.srs, now)).sort((a, b) => a.srs.due - b.srs.due);
+  return shuffle([...due.slice(0, s.reviewLimit), ...fresh.slice(0, Math.max(0, s.newGrammarPerDay - introG))]);
+}
+
 const Study = {
-  async words({ deckIds, tag = '', scheduled = true, mode = 'mix' }) {
-    const s = await getSettings();
-    const now = Date.now();
+  async words({ deckIds, tag = '', set = 'scheduled', mode = 'mix', count }) {
+    const ctx = await wordContext();
     const all = await DB.all('cards');
     const cards = all.filter(c => deckIds.includes(c.deckId) && (!tag || (c.tags || []).includes(tag)));
-    const dirs = mode === 'mix' ? ['rec', 'prod'] : [MODE_DIR[mode]];
-    let tasks;
-    if (!scheduled) {
-      tasks = shuffle(cards.flatMap(c => dirs.map(dir => ({ c, dir }))));
-    } else {
-      const due = [], fresh = [], prodNew = [];
-      for (const c of cards) {
-        for (const dir of dirs) {
-          const st = c.srs?.[dir];
-          if (st) { if (st.due <= now) due.push({ c, dir }); }
-          else if (dir === 'prod' && mode === 'mix') { if (c.srs?.rec) prodNew.push({ c, dir }); }
-          else fresh.push({ c, dir });
-        }
-      }
-      const intro = await introducedToday('word', dirs.length === 1 ? dirs[0] : 'rec');
-      due.sort((a, b) => a.c.srs[a.dir].due - b.c.srs[b.dir].due);
-      fresh.sort((a, b) => a.c.createdAt - b.c.createdAt);
-      tasks = shuffle([
-        ...due.slice(0, s.reviewLimit),
-        ...prodNew.slice(0, s.reviewLimit),
-        ...fresh.slice(0, Math.max(0, s.newPerDay - intro)),
-      ]);
-    }
+    const tasks = wordTasks(cards, { ...ctx, set, mode, count });
     if (!tasks.length) {
-      return emptySession(scheduled
-        ? 'На сьогодні все повторено. Нових слів немає або вже вивчено денний ліміт нових слів (його можна змінити в налаштуваннях).'
-        : 'У вибраних словниках немає слів.');
+      const msg = {
+        scheduled: 'За розкладом на сьогодні слів немає: повторення зроблено, а денний ліміт нових слів вичерпано.',
+        today: 'Сьогодні ще не було нових слів.',
+        next: 'Нових слів у вибраних словниках не лишилося.',
+        all: 'У вибраних словниках немає слів.',
+      }[set];
+      const left = cards.filter(isFresh).length;
+      const todayN = cards.filter(c => isToday(c, ctx.todayIds)).length;
+      return emptySession(msg, [
+        set !== 'today' && todayN && ['today', `Сьогоднішні слова (${todayN})`],
+        set !== 'next' && left && ['next', `Наступні ${Math.min(left, ctx.s.newPerDay)} нових слів`],
+      ].filter(Boolean), next => Study.words({ deckIds, tag, set: next, mode }));
     }
     const pool = cards.length >= 4 ? cards : all;
     runSession({
-      tasks, scheduled,
+      tasks, updates: set !== 'all',
       key: t => t.c.id + t.dir,
+      learning: t => t.c.srs?.[t.dir]?.learning,
       label: t => `<b>${esc(t.c.en)}</b> — ${esc(t.c.ua)}`,
       render: (t, el, answer) => WordEx[pickWordKind(t, mode)](t, el, answer, pool),
       apply: async (t, rating) => {
         const prev = t.c.srs?.[t.dir] || null;
-        t.c.srs = { ...(t.c.srs || {}), [t.dir]: SRS.review(prev, rating, Date.now(), s.retention) };
+        t.c.srs = { ...(t.c.srs || {}), [t.dir]: SRS.review(prev, rating, Date.now(), ctx.s.retention) };
         await DB.put('cards', t.c);
         await logReview('word', t.c.id, t.dir, rating, !prev);
       },
     });
   },
 
-  async grammar({ topicIds, scheduled = true }) {
+  async grammar({ topicIds, set = 'scheduled' }) {
     const s = await getSettings();
-    const now = Date.now();
     const [exs, topics] = await Promise.all([DB.all('exercises'), DB.all('topics')]);
     const tmap = Object.fromEntries(topics.map(t => [t.id, t]));
     const list = exs.filter(x => topicIds.includes(x.topicId));
-    let chosen;
-    if (!scheduled) chosen = shuffle(list);
-    else {
-      const due = list.filter(x => x.srs && x.srs.due <= now).sort((a, b) => a.srs.due - b.srs.due);
-      const fresh = list.filter(x => !x.srs).sort((a, b) => a.createdAt - b.createdAt);
-      const intro = await introducedToday('grammar');
-      chosen = shuffle([...due.slice(0, s.reviewLimit), ...fresh.slice(0, Math.max(0, s.newGrammarPerDay - intro))]);
-    }
+    const chosen = grammarTasks(list, { set, s, now: Date.now(), introG: await introducedToday('grammar') });
     if (!chosen.length) {
-      return emptySession(scheduled ? 'Граматичних вправ на сьогодні немає.' : 'У вибраних темах ще немає вправ.');
+      const msg = {
+        scheduled: 'За розкладом вправ на сьогодні немає.',
+        next: 'Нових вправ не лишилося.',
+        all: 'У вибраних темах ще немає вправ.',
+      }[set];
+      const left = list.filter(x => !x.srs).length;
+      return emptySession(msg, [
+        set !== 'next' && left && ['next', `Наступні ${Math.min(left, s.newGrammarPerDay)} нових вправ`],
+        set !== 'all' && list.length && ['all', `Усі вправи підряд (${list.length})`],
+      ].filter(Boolean), next => Study.grammar({ topicIds, set: next }));
     }
     runSession({
       tasks: chosen.map(x => ({ x, topic: tmap[x.topicId] })),
-      scheduled,
+      updates: set !== 'all',
       key: t => t.x.id,
+      learning: t => t.x.srs?.learning,
       label: t => `${esc(t.x.prompt)} → <b>${esc(t.x.answers[0])}</b>`,
       render: grammarEx,
       apply: async (t, rating) => {
@@ -90,8 +146,13 @@ const Study = {
   },
 };
 
-function emptySession(msg) {
-  app().innerHTML = `<div class="panel center"><h2>Немає що вчити</h2><p>${esc(msg)}</p><div class="btns center"><a class="btn" href="#/">На головну</a><a class="btn" href="#/study">Вибрати інші словники</a></div></div>`;
+function emptySession(msg, options = [], start) {
+  app().innerHTML = `<div class="panel center"><h2>За цим вибором вправ немає</h2><p>${esc(msg)}</p>
+    <div class="btns center">
+      ${options.map(([set, text]) => `<button class="btn primary" data-act="emptyStart" data-set="${set}">${esc(text)}</button>`).join('')}
+      <a class="btn" href="#/">На головну</a>
+    </div></div>`;
+  actions.emptyStart = el => start(el.dataset.set);
 }
 
 function runSession(cfg) {
@@ -109,7 +170,7 @@ function runSession(cfg) {
       <div class="session-head">
         <button class="btn ghost small" data-act="quit">Завершити</button>
         <div class="bar"><div style="width:${Math.round(done / total * 100)}%"></div></div>
-        <span class="muted">${done} / ${total}${cfg.scheduled ? '' : ' · без розкладу'}</span>
+        <span class="muted">${done} / ${total}${cfg.updates ? '' : ' · без розкладу'}</span>
       </div>
       <div id="ex"></div></div>`;
     actions.quit = finish;
@@ -119,10 +180,13 @@ function runSession(cfg) {
       answered = true;
       const k = cfg.key(t);
       if (!firstTry.has(k)) firstTry.set(k, rating > 1);
-      if (cfg.scheduled) await cfg.apply(t, rating);
-      if (rating === 1) {
-        wrong.set(k, t);
-        queue.splice(Math.min(queue.length, 3 + Math.floor(Math.random() * 3)), 0, t);
+      if (cfg.updates) await cfg.apply(t, rating);
+      if (rating <= 2) wrong.set(k, t);
+      // Слово лишається в сесії, поки не пройде етап «вчу»; без розкладу — поки не буде «Знаю».
+      const repeat = cfg.updates ? cfg.learning(t) : rating <= 2;
+      if (repeat) {
+        const gap = rating === 1 ? 3 + Math.floor(Math.random() * 3) : 6 + Math.floor(Math.random() * 5);
+        queue.splice(Math.min(queue.length, gap), 0, t);
       } else done++;
       step();
     });
@@ -136,12 +200,13 @@ function runSession(cfg) {
     app().innerHTML = `<div class="panel center">
       <h2>Готово</h2>
       <p>З першої спроби правильно: <b>${ok}</b> з ${n}.</p>
-      ${wrong.size ? `<h3>Були помилки</h3><ul class="wrong-list">${[...wrong.values()].map(t => `<li>${cfg.label(t)}</li>`).join('')}</ul>` : ''}
+      ${wrong.size ? `<h3>Варто повторити («Не знаю», «Важко», помилки)</h3><ul class="wrong-list">${[...wrong.values()].map(t => `<li>${cfg.label(t)}</li>`).join('')}</ul>` : ''}
       <div class="btns center">
-        ${wrong.size ? '<button class="btn primary" data-act="retry">Ще раз ці помилки</button>' : ''}
+        ${wrong.size ? '<button class="btn primary" data-act="retry">Ще раз ці слова</button>' : ''}
+        <a class="btn" href="#/study">Інший спосіб</a>
         <a class="btn" href="#/">На головну</a>
       </div></div>`;
-    actions.retry = () => runSession({ ...cfg, tasks: shuffle([...wrong.values()]), scheduled: false });
+    actions.retry = () => runSession({ ...cfg, tasks: shuffle([...wrong.values()]), updates: false });
   };
 
   step();
@@ -263,7 +328,7 @@ const WordEx = {
     };
     $('#show').onclick = reveal;
     document.onkeydown = e => {
-      if (e.key === ' ' || e.key === 'Enter') { e.preventDefault(); revealed() ? answer(3) : reveal(); }
+      if (e.key === ' ' || e.key === 'Enter') { e.preventDefault(); if (!revealed()) reveal(); }
       else if (revealed() && '1234'.includes(e.key)) answer(+e.key);
     };
   },

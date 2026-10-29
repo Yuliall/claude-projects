@@ -73,6 +73,7 @@ Views.settings = async () => {
 
 async function render() {
   document.onkeydown = null;
+  app().onchange = null;
   actions = {};
   $$('.modal-wrap').forEach(m => m.remove());
   const [path = '', ...rest] = location.hash.replace(/^#\/?/, '').split('/');
@@ -96,7 +97,19 @@ document.addEventListener('click', e => {
 });
 window.addEventListener('hashchange', render);
 
-DB.open().then(() => {
+async function upgradeLearningStates() {
+  if (await metaGet('learningStates')) return;
+  const now = Date.now();
+  const cards = await DB.all('cards');
+  cards.forEach(c => { if (c.srs) c.srs = { rec: SRS.upgrade(c.srs.rec, now), prod: SRS.upgrade(c.srs.prod, now) }; });
+  await DB.putMany('cards', cards);
+  const exs = await DB.all('exercises');
+  exs.forEach(x => { x.srs = SRS.upgrade(x.srs, now); });
+  await DB.putMany('exercises', exs);
+  await metaSet('learningStates', 1);
+}
+
+DB.open().then(upgradeLearningStates).then(() => {
   navigator.storage?.persist?.().catch(() => {});
   render();
 }).catch(err => {
