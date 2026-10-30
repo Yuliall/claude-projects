@@ -17,6 +17,7 @@ function norm(s) {
     .replace(/[’‘`ʼ]/g, "'")
     .replace(/won't/g, 'will not').replace(/can't/g, 'cannot').replace(/n't\b/g, ' not')
     .replace(/'ve\b/g, ' have').replace(/'ll\b/g, ' will').replace(/'re\b/g, ' are').replace(/'m\b/g, ' am')
+    .replace(/\b(it|that|there|what|here|where)'s\b/g, '$1 is')
     .replace(/[.,!?;:"«»“”()\[\]]/g, ' ')
     .replace(/\s+/g, ' ').trim();
 }

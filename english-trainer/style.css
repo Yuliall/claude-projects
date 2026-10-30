@@ -210,6 +210,9 @@ input.num { width: 72px; padding: 3px 6px; }
 .feedback.close b:first-child { color: var(--warn); }
 .feedback.bad { background: var(--bad-soft); }
 .feedback.bad b:first-child { color: var(--bad); }
+.diff { margin-top: 10px; text-align: center; font-size: 1.1rem; }
+.diff mark.ins { background: var(--ok-soft); color: var(--ok); font-weight: 600; padding: 0 3px; border-radius: 3px; }
+.diff s.del { color: var(--bad); }
 .say { border: 0; background: none; color: var(--accent); cursor: pointer; vertical-align: middle; padding: 2px 4px; }
 details.rule { margin-top: 20px; background: var(--panel); border: 1px solid var(--border); border-radius: var(--radius); padding: 10px 14px; }
 details summary { cursor: pointer; font-weight: 500; }

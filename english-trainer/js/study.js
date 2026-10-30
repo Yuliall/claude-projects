@@ -382,6 +382,33 @@ const WordEx = {
   },
 };
 
+// Порівнює слова відповіді з правильним варіантом: пропущені слова підсвічує, зайві закреслює.
+function wordDiff(given, correct) {
+  // Скорочення розгортаються («We're» → we are), тож повна форма не вважається помилкою.
+  const units = s => s.trim().split(/\s+/).flatMap(tok => {
+    const parts = norm(tok).split(' ').filter(Boolean);
+    return parts.map((p, k) => ({ show: k === 0 ? tok : '', key: p }));
+  });
+  const ua = units(given), ub = units(correct);
+  const na = ua.map(u => u.key), nb = ub.map(u => u.key);
+  // Збіги показуються так, як написала користувачка; частина скорочення без власного тексту — як розгорнуте слово.
+  const a = ua.map(u => u.show), b = ub.map(u => u.show || u.key);
+  const L = Array.from({ length: a.length + 1 }, () => new Array(b.length + 1).fill(0));
+  for (let i = a.length - 1; i >= 0; i--) {
+    for (let j = b.length - 1; j >= 0; j--) {
+      L[i][j] = na[i] === nb[j] ? L[i + 1][j + 1] + 1 : Math.max(L[i + 1][j], L[i][j + 1]);
+    }
+  }
+  const out = [];
+  let i = 0, j = 0;
+  while (i < a.length || j < b.length) {
+    if (i < a.length && j < b.length && na[i] === nb[j]) { if (a[i]) out.push(esc(a[i])); i++; j++; }
+    else if (j < b.length && (i >= a.length || L[i][j + 1] >= L[i + 1][j])) { out.push(`<mark class="ins" title="пропущено">${esc(b[j])}</mark>`); j++; }
+    else { out.push(`<s class="del" title="зайве">${esc(a[i] || na[i])}</s>`); i++; }
+  }
+  return out.join(' ');
+}
+
 function grammarEx(t, el, answer) {
   const x = t.x, topic = t.topic;
   const sentence = esc(x.prompt).replace(/_{2,}/g, '<span class="gap">____</span>');
@@ -399,11 +426,16 @@ function grammarEx(t, el, answer) {
     ${topic?.content ? `<details class="rule"><summary>Правило: ${esc(topic.name)}</summary><div class="md">${md(topic.content)}</div></details>` : ''}`;
   const accepted = x.answers.map(norm);
   let result = null;
-  const show = ok => {
+  const show = (ok, given) => {
     result = ok ? 3 : 1;
     const ref = x.answers.map(esc).join(' / ');
     const info = ok ? (x.kind === 'translate' && x.answers.length > 1 ? `Варіанти: ${ref}` : '') : `Правильно: <b>${ref}</b>`;
-    $('#after').innerHTML = `${feedback(ok ? 'ok' : 'bad', info)}
+    let diff = '';
+    if (!ok && given) {
+      const closest = x.answers.reduce((best, a) => lev(norm(given), norm(a)) < lev(norm(given), norm(best)) ? a : best);
+      diff = `<div class="diff"><span class="muted">Різниця з найближчою правильною:</span><br>${wordDiff(given, closest)}</div>`;
+    }
+    $('#after').innerHTML = `${feedback(ok ? 'ok' : 'bad', info)}${diff}
       ${x.explanation ? `<div class="ex-note">${esc(x.explanation)}</div>` : ''}
       <div class="ex-actions">
         ${!ok && !isChoice ? '<button class="btn ghost" id="accept">Моя відповідь теж правильна</button>' : ''}
@@ -437,7 +469,7 @@ function grammarEx(t, el, answer) {
       if (result !== null || !v.trim()) return;
       $('#ti').disabled = true;
       $('#tf button').disabled = true;
-      show(accepted.includes(norm(v)));
+      show(accepted.includes(norm(v)), v);
     };
     document.onkeydown = e => {
       if (result !== null && e.key === 'Enter') { e.preventDefault(); answer(result); }
