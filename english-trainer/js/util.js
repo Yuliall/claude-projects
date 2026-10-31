@@ -131,7 +131,10 @@ async function metaGet(key, fallback = null) {
 }
 const metaSet = (key, value) => DB.put('meta', { key, value });
 
-const DEFAULT_SETTINGS = { newPerDay: 20, newGrammarPerDay: 10, reviewLimit: 200, retention: 0.9, level: 'B1' };
+const DEFAULT_SETTINGS = {
+  newPerDay: 20, newGrammarPerDay: 10, reviewLimit: 200, retention: 0.9, level: 'B1',
+  exprReviewsPerDay: 15, exprNewPerDay: 7, exprActiveMax: 20,
+};
 async function getSettings() {
   return { ...DEFAULT_SETTINGS, ...(await metaGet('settings', {})) };
 }

@@ -1,7 +1,10 @@
 Views[''] = async () => {
-  const [decks, cards, exercises, topics, lastExport, ctx] = await Promise.all([
-    DB.all('decks'), DB.all('cards'), DB.all('exercises'), DB.all('topics'), metaGet('lastExport'), wordContext(),
+  const [decks, cards, exercises, topics, lastExport, ctx, xp] = await Promise.all([
+    DB.all('decks'), DB.all('cards'), DB.all('exercises'), DB.all('topics'), metaGet('lastExport'), wordContext(), exprPlan(),
   ]);
+  const xToday = xp.reviews.length + xp.fresh.length;
+  const xActive = xp.all.filter(c => c.status === 'active').length;
+  const xQueued = xp.all.filter(c => c.status === 'queued').length;
   const { s, now } = ctx;
   const sched = wordTasks(cards, { ...ctx, set: 'scheduled', mode: 'mix' });
   const schedNew = sched.filter(t => t.dir === 'rec' && !t.c.srs?.rec).length;
@@ -28,6 +31,17 @@ Views[''] = async () => {
         <button class="btn big" data-act="grammar" ${gTotal ? '' : 'disabled'}>Граматика: ${gTotal}</button>
       </div>
     </section>
+    <div class="panel">
+      <div class="toolbar"><h3>Вирази · Expressions</h3></div>
+      <p class="muted">${xp.all.length
+        ? `На сьогодні: ${xToday}. Активних ${xActive} з ${xp.lim.activeMax}${xQueued ? `, у черзі ${xQueued}` : ''}.`
+        : 'Вставте вирази з уроку через імпорт і тренуйте їх згадування.'}</p>
+      <div class="btns">
+        ${xp.all.length ? `<a class="btn primary" href="#/expr-review">Повторити вирази: ${xToday}</a>` : '<a class="btn primary" href="#/expr-import">Імпорт виразів</a>'}
+        <button class="btn" data-act="rolePlay">Скопіювати для рольової гри · Copy for role-play</button>
+        <a class="btn ghost" href="#/expr">Усі вирази</a>
+      </div>
+    </div>
     ${todayN || freshN ? `<div class="panel">
       <div class="toolbar">
         <h3>Сьогоднішні слова</h3>
@@ -60,6 +74,7 @@ Views[''] = async () => {
   actions.today = () => Study.words({ deckIds, set: 'today', mode: 'mix' });
   actions.next = () => Study.words({ deckIds, set: 'next', mode: 'mix' });
   actions.grammar = () => Study.grammar({ topicIds: topics.map(t => t.id), set: 'scheduled' });
+  actions.rolePlay = copyRolePlay;
 };
 
 function folderDatalist(items, id = 'folders') {
@@ -224,6 +239,7 @@ Views.deck = async id => {
       <div class="toolbar sel-bar" id="selBar" hidden>
         <span id="selCount"></span>
         ${others.length ? `<select id="moveTo"><option value="">Перемістити в…</option>${others.map(d => `<option value="${d.id}">${esc(d.name)}</option>`).join('')}</select>` : ''}
+        <button class="btn small" data-act="toExpr" title="Копіює слова у вирази; у словнику вони лишаються">До виразів</button>
         <button class="btn small" data-act="resetSel">Скинути прогрес</button>
         <button class="btn small danger" data-act="deleteSel">Видалити</button>
       </div>
@@ -325,6 +341,22 @@ Views.deck = async id => {
       onSave: drawRows,
       onDelete: () => { cards = cards.filter(c => c.id !== card.id); sel.delete(card.id); drawRows(); },
     });
+  };
+  actions.toExpr = async () => {
+    const existing = await DB.all('expressions');
+    const known = new Set(existing.map(x => ExprCore.expressionKey(x.expression)));
+    const now = Date.now();
+    const fresh = [];
+    for (const c of cards.filter(c => sel.has(c.id))) {
+      const key = ExprCore.expressionKey(c.en);
+      if (!key || known.has(key)) continue;
+      known.add(key);
+      fresh.push(ExprCore.makeExpression({ expression: c.en, meaning_uk: c.ua, cue_uk: '', example_en: c.example, note: c.note }, deck.name, now + fresh.length));
+    }
+    await DB.putMany('expressions', fresh);
+    await promoteQueue();
+    const skipped = sel.size - fresh.length;
+    toast(`До виразів додано: ${fresh.length}${skipped ? `, уже були: ${skipped}` : ''}. Ситуацію-підказку можна дописати у «Вирази».`);
   };
   actions.deleteSel = async () => {
     if (!confirm(`Видалити вибрані слова (${sel.size})?`)) return;
@@ -584,6 +616,8 @@ Views.study = async preId => {
     count: Math.max(1, +$('#nextCount').value || ctx.s.newPerDay),
   });
   const updateCounts = () => {
+    // Сесія тренування малює себе в тому самому #app, тож поза сторінкою вибору нічого не рахуємо.
+    if (!$('#nextCount')) { app().onchange = null; return; }
     const p = params();
     const chosen = cards.filter(c => p.deckIds.includes(c.deckId) && (!p.tag || (c.tags || []).includes(p.tag)));
     for (const set of Object.keys(WORD_SETS)) {

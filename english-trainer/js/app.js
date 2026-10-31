@@ -1,4 +1,4 @@
-const STORES = ['decks', 'cards', 'topics', 'exercises', 'log'];
+const STORES = ['decks', 'cards', 'topics', 'exercises', 'expressions', 'log'];
 
 Views.settings = async () => {
   const [s, lastExport, counts] = await Promise.all([
@@ -17,11 +17,16 @@ Views.settings = async () => {
         <select name="retention">${[0.8, 0.85, 0.9, 0.95].map(r => `<option value="${r}" ${r === s.retention ? 'selected' : ''}>${Math.round(r * 100)}%${r === 0.9 ? ' (рекомендовано)' : ''}</option>`).join('')}</select>
       </label>
       <p class="muted">Вищий відсоток означає частіші повторення.</p>
+      <h3>Вирази</h3>
+      <label>Повторень виразів на день<input type="number" name="exprReviewsPerDay" min="0" max="200" value="${s.exprReviewsPerDay}"></label>
+      <label>Нових виразів на день<input type="number" name="exprNewPerDay" min="0" max="100" value="${s.exprNewPerDay}"></label>
+      <label>Активних виразів одночасно<input type="number" name="exprActiveMax" min="1" max="200" value="${s.exprActiveMax}"></label>
+      <p class="muted">Повторення понад денний ліміт переходять на наступний день. Нові вирази понад кількість активних чекають у черзі.</p>
       <div class="btns"><button class="btn primary">Зберегти</button></div>
     </form>
     <div class="panel stack">
       <h3>Резервна копія</h3>
-      <p>У базі: словників ${counts[0]}, слів ${counts[1]}, граматичних тем ${counts[2]}, вправ ${counts[3]}.</p>
+      <p>У базі: словників ${counts[0]}, слів ${counts[1]}, граматичних тем ${counts[2]}, вправ ${counts[3]}, виразів ${counts[4]}.</p>
       <p class="muted">Дані зберігаються в цьому браузері. ${persisted ? 'Браузер позначив їх як постійні.' : 'Браузер може видалити їх, якщо закінчиться місце на диску.'} Остання копія: ${lastExport ? new Date(lastExport).toLocaleString('uk-UA') : 'ще не робили'}.</p>
       <div class="btns">
         <button class="btn primary" data-act="export">Зберегти копію у файл</button>
@@ -37,7 +42,11 @@ Views.settings = async () => {
   $('#sf').onsubmit = async e => {
     e.preventDefault();
     const f = Object.fromEntries(new FormData(e.target));
-    await saveSettings({ ...s, newPerDay: +f.newPerDay, newGrammarPerDay: +f.newGrammarPerDay, reviewLimit: +f.reviewLimit, retention: +f.retention });
+    await saveSettings({
+      ...s, newPerDay: +f.newPerDay, newGrammarPerDay: +f.newGrammarPerDay, reviewLimit: +f.reviewLimit, retention: +f.retention,
+      exprReviewsPerDay: Math.max(0, +f.exprReviewsPerDay), exprNewPerDay: Math.max(0, +f.exprNewPerDay), exprActiveMax: Math.max(1, +f.exprActiveMax),
+    });
+    await promoteQueue();
     toast('Збережено');
   };
   actions.export = async () => {
@@ -54,9 +63,11 @@ Views.settings = async () => {
     try { data = JSON.parse(await file.text()); } catch { toast('Файл пошкоджений або не JSON'); return; }
     if (data.app !== 'english-trainer') { toast('Це не файл копії English Trainer'); return; }
     const replace = confirm('Замінити всі поточні дані даними з файлу?\n\nOK: замінити.\nСкасувати: об\'єднати (дані з файлу додадуться до наявних).');
+    // Сховища, яких немає у файлі (наприклад, вирази в старій копії), не очищаються.
     for (const n of STORES) {
+      if (!Array.isArray(data[n])) continue;
       if (replace) await DB.clear(n);
-      if (Array.isArray(data[n])) await DB.putMany(n, n === 'log' && !replace ? data[n].map(({ id, ...rest }) => rest) : data[n]);
+      await DB.putMany(n, n === 'log' && !replace ? data[n].map(({ id, ...rest }) => rest) : data[n]);
     }
     if (data.settings) await saveSettings({ ...s, ...data.settings });
     toast('Дані відновлено');
@@ -78,7 +89,7 @@ async function render() {
   $$('.modal-wrap').forEach(m => m.remove());
   const [path = '', ...rest] = location.hash.replace(/^#\/?/, '').split('/');
   const arg = decodeURIComponent(rest.join('/'));
-  const navKey = { deck: 'decks', topic: 'grammar' }[path] ?? path;
+  const navKey = { deck: 'decks', topic: 'grammar', 'expr-review': 'expr', 'expr-import': 'expr', 'expr-progress': 'expr' }[path] ?? path;
   $$('[data-nav]').forEach(a => a.classList.toggle('active', a.dataset.nav === navKey));
   try {
     await (Views[path] || Views[''])(arg);
