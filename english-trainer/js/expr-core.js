@@ -220,6 +220,59 @@ const ExprCore = (() => {
     };
   }
 
+  // ---------- етап вивчення нових виразів ----------
+  // Підказка з перших літер: «have an impact on something» → «h___ an i_____ on something».
+  // Артиклі й заповнювачі (something, someone) лишаються як є.
+  function hintPattern(expression) {
+    return String(expression ?? '').replace(/[A-Za-z][A-Za-z'’]*/g, w =>
+      ARTICLES.has(w.toLowerCase()) || PLACEHOLDERS.has(w.toLowerCase()) ? w : w[0] + '_'.repeat(w.length - 1));
+  }
+
+  // Кроки сесії: для нових виразів знайомство → вибір виразу до кожної ситуації → написання з підказкою;
+  // далі повторення вже знайомих. canChoose(card) каже, чи є з чого складати варіанти.
+  function sessionSteps(fresh, reviews, { rng = Math.random, canChoose = () => true } = {}) {
+    const steps = fresh.map(c => ({ kind: 'intro', id: c.id }));
+    const choices = [];
+    for (const c of fresh) {
+      if (!canChoose(c)) continue;
+      (c.cues_uk || []).forEach((cue, cueIndex) => { if (cue) choices.push({ kind: 'choice', id: c.id, cueIndex }); });
+    }
+    // Перемішуємо, але так, щоб дві ситуації одного виразу не йшли поспіль, коли цього можна уникнути.
+    const shuffled = [];
+    const pool = [...choices];
+    while (pool.length) {
+      const prev = shuffled[shuffled.length - 1];
+      const allowed = pool.filter(s => !prev || s.id !== prev.id);
+      const from = allowed.length ? allowed : pool;
+      const pick = from[Math.min(from.length - 1, Math.floor(rng() * from.length))];
+      pool.splice(pool.indexOf(pick), 1);
+      shuffled.push(pick);
+    }
+    steps.push(...shuffled);
+    steps.push(...fresh.map(c => ({ kind: 'write', id: c.id })));
+    steps.push(...reviews.map(c => ({ kind: 'review', id: c.id })));
+    return steps;
+  }
+
+  // Правильний вираз і до n-1 інших для вибору: спершу з тієї самої сфери, без однакових за змістом.
+  function choiceOptions(card, pool, n = 4, rng = Math.random) {
+    const key = expressionKey(card.expression);
+    const seen = new Set([key]);
+    const shuffle = list => list.map(c => [rng(), c]).sort((a, b) => a[0] - b[0]).map(x => x[1]);
+    const others = pool.filter(c => c.id !== card.id && c.status !== 'queued');
+    const same = shuffle(others.filter(c => (c.domain === 'life') === isLife(card)));
+    const rest = shuffle(others.filter(c => (c.domain === 'life') !== isLife(card)));
+    const picked = [];
+    for (const c of [...same, ...rest]) {
+      const k = expressionKey(c.expression);
+      if (!k || seen.has(k)) continue;
+      seen.add(k);
+      picked.push(c.expression);
+      if (picked.length === n - 1) break;
+    }
+    return shuffle([card.expression, ...picked]);
+  }
+
   function parseDomain(s) {
     const v = String(s ?? '').trim().toLowerCase();
     if (['робота', 'work'].includes(v)) return 'work';
@@ -376,6 +429,7 @@ const ExprCore = (() => {
     dayKey, addDays, weekStart, tokenize, analyse, expressionKey, compare,
     schedule, isNew, countDone, planDay, promote, checkMastered, applyUsage, makeExpression,
     pickCue, upgrade, parseDomain, parseImport, weeklyProgress, rolePlayPick,
+    hintPattern, sessionSteps, choiceOptions,
   };
 })();
 

@@ -224,13 +224,27 @@ Views['expr-review'] = async () => {
       <div class="btns center"><a class="btn" href="#/expr-import">Імпорт</a><a class="btn" href="#/expr">Усі вирази</a><a class="btn" href="#/">На головну</a></div></div>`;
     return;
   }
-  runExprSession(tasks);
+  runExprSession(plan);
 };
 
-function runExprSession(tasks) {
-  const queue = tasks.map(c => ({ c, practice: false }));
-  const total = tasks.length;
+const STAGE_LABEL = {
+  intro: 'Крок 1 з 3 · знайомство',
+  choice: 'Крок 2 з 3 · у ситуаціях',
+  write: 'Крок 3 з 3 · пишемо з підказкою',
+  review: 'Повторення',
+};
+
+// Нові вирази проходять три кроки (знайомство → вибір у ситуаціях → написання з підказкою),
+// оцінка й розклад починаються з третього кроку. Знайомі вирази одразу йдуть на повторення.
+function runExprSession(plan) {
+  const byId = Object.fromEntries([...plan.fresh, ...plan.reviews].map(c => [c.id, c]));
+  const pool = plan.all;
+  const queue = ExprCore.sessionSteps(plan.fresh, plan.reviews, {
+    canChoose: c => ExprCore.choiceOptions(c, pool).length >= 2,
+  }).map(s => ({ ...s, practice: false }));
+  const total = queue.length;
   const results = new Map();
+  const askedImage = new Set();
   let done = 0;
 
   const step = () => {
@@ -238,44 +252,64 @@ function runExprSession(tasks) {
     app().onchange = null;
     if (!queue.length) return finish();
     const t = queue.shift();
+    const c = byId[t.id];
     app().innerHTML = `<div class="session">
       <div class="session-head">
         <button class="btn ghost small" data-act="quit">Завершити</button>
         <div class="bar"><div style="width:${Math.round(done / total * 100)}%"></div></div>
         <span class="muted">${done} / ${total}</span>
       </div>
+      <div class="stage-label">${STAGE_LABEL[t.kind]}</div>
       <div id="ex"></div></div>`;
     actions.quit = finish;
+
+    if (t.kind === 'intro') {
+      introCard(c, $('#ex'), () => { done++; step(); });
+      return;
+    }
+    if (t.kind === 'choice') {
+      choiceCard(c, t.cueIndex, pool, $('#ex'), correct => {
+        if (correct) done++;
+        else {
+          // Помилкова ситуація повертається ще раз, до кроку написання.
+          const at = queue.findIndex(s => s.kind === 'write' || s.kind === 'review');
+          queue.splice(at < 0 ? queue.length : at, 0, t);
+        }
+        step();
+      });
+      return;
+    }
+
     let graded = false;
-    exprCard(t, $('#ex'), async (grade, cueIndex) => {
+    exprCard({ c, practice: t.practice, hint: t.kind === 'write' }, $('#ex'), async (grade, cueIndex) => {
       if (graded) return;
       graded = true;
+      let cur = c;
       if (!t.practice) {
-        const wasNew = ExprCore.isNew(t.c);
-        const upd = ExprCore.schedule(t.c, grade, ExprCore.dayKey(), cueIndex);
-        await DB.put('expressions', upd);
-        await DB.put('log', { ts: Date.now(), type: 'expr', itemId: upd.id, grade, first: wasNew });
-        results.set(upd.id, { c: upd, grade });
-        t.c = upd;
+        const wasNew = ExprCore.isNew(c);
+        cur = ExprCore.schedule(c, grade, ExprCore.dayKey(), cueIndex);
+        await DB.put('expressions', cur);
+        await DB.put('log', { ts: Date.now(), type: 'expr', itemId: cur.id, grade, first: wasNew });
+        results.set(cur.id, { c: cur, grade });
       } else {
-        t.c = { ...t.c, last_cue_index: cueIndex };
+        cur = { ...c, last_cue_index: cueIndex };
       }
+      byId[cur.id] = cur;
       const next = () => {
         // «Забула» ще раз у кінці сесії лише для практики; на розклад це не впливає.
-        if (grade === 'forgot' && !t.practice) queue.push({ c: t.c, practice: true });
+        if (grade === 'forgot' && !t.practice) queue.push({ ...t, practice: true });
         else done++;
         step();
       };
-      if (grade !== 'got' && !t.c.image_note && !askedImage.has(t.c.id)) {
-        askedImage.add(t.c.id);
-        imagePrompt(t.c, $('#ex'), saved => {
-          t.c = saved;
+      if (grade !== 'got' && !cur.image_note && !askedImage.has(cur.id)) {
+        askedImage.add(cur.id);
+        imagePrompt(cur, $('#ex'), saved => {
+          byId[saved.id] = saved;
           if (results.has(saved.id)) results.get(saved.id).c = saved;
         }, next);
       } else next();
     });
   };
-  const askedImage = new Set();
 
   const finish = () => {
     document.onkeydown = null;
@@ -334,17 +368,69 @@ function imagePrompt(c, el, onSaved, done) {
   };
 }
 
+function introCard(c, el, next) {
+  const cues = c.cues_uk.filter(Boolean);
+  el.innerHTML = `<div class="ex-card intro">
+      <div class="ex-label">${domainBadge(c.domain)} Новий вираз</div>
+      <div class="ex-word">${esc(c.expression)} ${sayBtn(c.expression)}</div>
+      <div class="ex-meaning big">${esc(c.meaning_uk)}</div>
+      ${c.image_note ? `<div class="ex-image"><span class="muted small">Образ</span>${esc(c.image_note)}</div>` : ''}
+      ${c.example_en ? `<div class="ex-example">${esc(c.example_en)}</div>` : ''}
+      ${cues.length ? `<div class="intro-cues"><div class="muted small">Коли це кажуть</div><ul>${cues.map(s => `<li>${esc(s)}</li>`).join('')}</ul></div>` : ''}
+      ${c.note ? `<div class="ex-note">З уроку: «${esc(c.note)}»</div>` : ''}
+    </div>
+    <p class="instruction">Прочитайте вираз уголос кілька разів і уявіть образ. Нічого вводити не треба.</p>
+    <div class="ex-actions"><button class="btn primary big" id="next">Зрозуміло, далі <kbd>Enter</kbd></button></div>`;
+  bindSay(el);
+  $('#next').onclick = next;
+  $('#next').focus();
+  document.onkeydown = e => { if (e.key === 'Enter') { e.preventDefault(); next(); } };
+}
+
+function choiceCard(c, cueIndex, pool, el, onDone) {
+  const opts = ExprCore.choiceOptions(c, pool);
+  el.innerHTML = `<div class="ex-card">
+      <div class="ex-label">${domainBadge(c.domain)} Який вираз підходить до ситуації?</div>
+      <div class="ex-sentence">${esc(c.cues_uk[cueIndex])}</div>
+    </div>
+    <div class="options">${opts.map((o, i) => `<button class="btn option" data-i="${i}"><kbd>${i + 1}</kbd> ${esc(o)}</button>`).join('')}</div>
+    <div id="after"></div>`;
+  let correct = null;
+  const pick = i => {
+    if (correct !== null) return;
+    correct = opts[i] === c.expression;
+    $$('.option', el).forEach((b, j) => {
+      b.disabled = true;
+      if (opts[j] === c.expression) b.classList.add('correct');
+      else if (j === i) b.classList.add('wrong');
+    });
+    $('#after').innerHTML = `${feedback(correct ? 'ok' : 'bad', `<b>${esc(c.expression)}</b> ${sayBtn(c.expression)} — ${esc(c.meaning_uk)}`)}
+      ${c.image_note ? `<div class="ex-image"><span class="muted small">Образ</span>${esc(c.image_note)}</div>` : ''}
+      <div class="ex-actions"><button class="btn primary" id="next">Далі <kbd>Enter</kbd></button></div>`;
+    bindSay($('#after'));
+    $('#next').onclick = () => onDone(correct);
+    $('#next').focus();
+  };
+  $$('.option', el).forEach((b, i) => { b.onclick = () => pick(i); });
+  document.onkeydown = e => {
+    if (correct === null && e.key >= '1' && e.key <= String(opts.length)) pick(+e.key - 1);
+    else if (correct !== null && e.key === 'Enter') { e.preventDefault(); onDone(correct); }
+  };
+}
+
 function exprCard(t, el, onGrade) {
   const c = t.c;
   const cue = ExprCore.pickCue(c);
+  const label = t.practice ? 'Ще раз' : t.hint ? 'Напишіть вираз за підказкою' : 'Згадайте вираз англійською';
   el.innerHTML = `<div class="ex-card">
-      <div class="ex-label">${domainBadge(c.domain)} ${t.practice ? 'Ще раз · Once more' : 'Згадайте вираз англійською · Recall the expression'}</div>
+      <div class="ex-label">${domainBadge(c.domain)} ${label}</div>
       ${cue.text ? `<div class="ex-sentence">${esc(cue.text)}</div>` : ''}
       <div class="ex-meaning">${esc(c.meaning_uk)}</div>
-      <div class="say-first">Спершу скажіть вголос · Say it aloud first</div>
+      ${t.hint ? `<div class="hint-pattern" title="Перші літери слів">${esc(ExprCore.hintPattern(c.expression))}</div>` : ''}
     </div>
+    <p class="instruction">Спершу скажіть вираз уголос, потім надрукуйте його.</p>
     <form id="ef" class="type-form expr-form">
-      <input id="ei" autocomplete="off" autocapitalize="off" spellcheck="false" placeholder="Вираз англійською · Type the expression">
+      <input id="ei" autocomplete="off" autocapitalize="off" spellcheck="false" placeholder="Вираз англійською">
       ${SpeechRec ? `<button type="button" class="btn mic" id="mic" title="Продиктувати · Dictate" aria-label="Продиктувати">${MIC_ICON}</button>` : ''}
       <button class="btn primary">Перевірити · Check</button>
     </form>
