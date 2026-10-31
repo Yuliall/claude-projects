@@ -95,7 +95,9 @@ async function render() {
     await (Views[path] || Views[''])(arg);
   } catch (err) {
     console.error(err);
-    app().innerHTML = `<div class="panel">Сталася помилка: ${esc(err.message)}</div>`;
+    app().innerHTML = err?.name === 'NotFoundError'
+      ? `<div class="panel">Браузер завантажив частину файлів старої версії. Дані в безпеці. Оновіть сторінку з очищенням кешу: <b>Ctrl+Shift+R</b> (на Mac <b>Cmd+Shift+R</b>; на телефоні закрийте вкладку й відкрийте знову).</div>`
+      : `<div class="panel">Сталася помилка: ${esc(err.message)}</div>`;
   }
   window.scrollTo(0, 0);
 }
