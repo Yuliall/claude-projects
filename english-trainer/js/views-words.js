@@ -38,7 +38,7 @@ Views[''] = async () => {
         : 'Вставте вирази з уроку через імпорт і тренуйте їх згадування.'}</p>
       <div class="btns">
         ${xp.all.length ? `<a class="btn primary" href="#/expr-review">Повторити вирази: ${xToday}</a>` : '<a class="btn primary" href="#/expr-import">Імпорт виразів</a>'}
-        <button class="btn" data-act="dialog">Скопіювати для діалогу</button>
+        <a class="btn" href="#/roleplay">Рольова гра</a>
         <a class="btn ghost" href="#/expr">Усі вирази</a>
       </div>
     </div>
@@ -74,7 +74,6 @@ Views[''] = async () => {
   actions.today = () => Study.words({ deckIds, set: 'today', mode: 'mix' });
   actions.next = () => Study.words({ deckIds, set: 'next', mode: 'mix' });
   actions.grammar = () => Study.grammar({ topicIds: topics.map(t => t.id), set: 'scheduled' });
-  actions.dialog = chooseDialog;
 };
 
 function folderDatalist(items, id = 'folders') {

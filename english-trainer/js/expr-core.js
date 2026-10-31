@@ -269,6 +269,98 @@ const ExprCore = (() => {
     return shuffle([card.expression, ...picked]);
   }
 
+  // ---------- рольова гра з Claude ----------
+  const HINT_RULES = {
+    full: [
+      'Рівень підказок: повний. На початку покажи мені список виразів зі значеннями українською.',
+      'Якщо я застрягла, можеш нагадати вираз повністю.',
+      'Оскільки вирази були перед очима, у звіті всі вжиті вирази позначай «з підказкою».',
+    ],
+    letters: [
+      'Рівень підказок: перші літери. На початку покажи лише значення українською, без англійських виразів.',
+      'Якщо я напишу «hint» або «підказка», дай перші літери потрібного виразу (шаблон [підказка: …] біля виразу у списку вище).',
+      'Вираз, ужитий до підказки для нього, у звіті — «без підказки»; після підказки — «з підказкою».',
+    ],
+    none: [
+      'Рівень підказок: без підказок. Не показуй список і не називай вирази та їхні значення.',
+      'Якщо я попрошу допомоги, спершу опиши українською, що я хочу сказати; якщо не допоможе, дай перші літери (шаблон [підказка: …] біля виразу у списку вище).',
+      'Вираз, ужитий до будь-якої підказки для нього, у звіті — «без підказки»; після підказки — «з підказкою».',
+    ],
+  };
+  const REPORT_RESULTS = { unprompted: 'без підказки', hint: 'з підказкою', none: 'не вжито' };
+
+  function buildRolePlayPrompt({ expressions, domain, mode, hints, level = 'B1' }) {
+    const scene = domain === 'life' ? 'побутова (повсякденне життя)' : 'робоча';
+    const format = mode === 'voice'
+      ? ['Формат: голос. Я говоритиму через голосовий режим. Відповідай коротко, 1–2 речення, одне питання за раз, без списків і розмітки.',
+        'Коли я скажу «report» або «звіт», напиши підсумок і звіт текстом у чаті.']
+      : ['Формат: переписка. Твої репліки короткі, 1–3 речення, як у месенджері.'];
+    const list = expressions.map((c, i) => {
+      const cues = (c.cues_uk || []).filter(Boolean);
+      return `${i + 1}. ${c.expression} — ${c.meaning_uk}` +
+        (hints !== 'full' ? ` [підказка: ${hintPattern(c.expression)}]` : '') +
+        (cues.length ? `\n   ситуації: ${cues.join('; ')}` : '');
+    }).join('\n');
+    return [
+      `Ти мій партнер у рольовій грі англійською. Мій рівень ${level}. Сцена: ${scene}.`,
+      ...format,
+      '',
+      'Мета: щоб я сама вжила в розмові ці вирази:',
+      list,
+      '',
+      'Правила:',
+      '- Придумай одну реалістичну сцену (можна спертися на ситуації вище), опиши її мені 1–2 реченнями українською й почни розмову англійською.',
+      '- Веди розмову так, щоб для відповіді природно знадобився кожен вираз. Сам ці вирази не вживай, поки я їх не вжила.',
+      '- Зараховуй будь-яку правильну форму (pushed back on, is pushing back on) і заміну something/someone своїми словами. Дослівно повторювати приклад не потрібно.',
+      '- Якщо я вжила вираз неправильно за змістом чи граматикою, коротко виправ одним реченням і продовжуй сцену. Неправильне вживання не зараховуй.',
+      ...HINT_RULES[hints].map(r => '- ' + r),
+      '- Говори англійською; українською лише опис сцени, виправлення й поради.',
+      '- Розмова триває 10–16 моїх реплік. Коли всі вирази вжито або я напишу «stop», заверши сцену.',
+      '',
+      'Наприкінці дай 2–3 короткі поради українською, а потім звіт одним блоком коду, по рядку на кожен вираз зі списку, строго у форматі:',
+      'вираз | результат | моя фраза',
+      `де вираз — точно як у списку, результат — одне з: ${Object.values(REPORT_RESULTS).join(' / ')}, моя фраза — моє речення з цим виразом (якщо не вжито — порожньо).`,
+    ].join('\n');
+  }
+
+  function parseResult(s) {
+    const v = String(s ?? '').trim().toLowerCase().replace(/[.!«»"]/g, '');
+    if (['без підказки', 'unprompted', 'without hint', 'no hint'].includes(v)) return 'unprompted';
+    if (['з підказкою', 'with hint', 'hint', 'prompted'].includes(v)) return 'hint';
+    if (['не вжито', 'не вжила', 'not used', 'none', '-', '—', ''].includes(v)) return 'none';
+    return null;
+  }
+
+  // Розбирає звіт Claude: рядки «вираз | результат | моя фраза». Інший текст навколо ігнорується.
+  function parseRolePlayReport(text, cards) {
+    const byKey = new Map(cards.map(c => [expressionKey(c.expression), c]));
+    const rows = [];
+    const seen = new Map();
+    String(text ?? '').split(/\r?\n/).forEach((raw, i) => {
+      let line = raw.trim();
+      if (!line.includes('|') || /^[|\s:-]+$/.test(line)) return;
+      line = line.replace(/^\|/, '').replace(/\|$/, '');
+      const [expr = '', res = '', phrase = ''] = line.split('|').map(s => s.trim());
+      if (['вираз', 'expression'].includes(expr.toLowerCase())) return;
+      const card = byKey.get(expressionKey(expr.replace(/^\d+[.)]\s*/, '')));
+      const result = parseResult(res);
+      const row = { line: i + 1, expression: expr, card: card || null, result, phrase, errors: [], duplicate: false };
+      if (!card) row.errors.push('Такого виразу немає серед ваших виразів');
+      if (!result) row.errors.push(`Незрозумілий результат «${res}»: потрібно ${Object.values(REPORT_RESULTS).join(' / ')}`);
+      if (card && result) {
+        const prev = seen.get(card.id);
+        if (prev) {
+          // Той самий вираз двічі: лишаємо кращий результат.
+          const rank = { unprompted: 2, hint: 1, none: 0 };
+          if (rank[result] > rank[prev.result]) { prev.duplicate = true; seen.set(card.id, row); }
+          else row.duplicate = true;
+        } else seen.set(card.id, row);
+      }
+      rows.push(row);
+    });
+    return rows;
+  }
+
   function parseDomain(s) {
     const v = String(s ?? '').trim().toLowerCase();
     if (['робота', 'work'].includes(v)) return 'work';
@@ -426,6 +518,7 @@ const ExprCore = (() => {
     schedule, isNew, countDone, planDay, promote, checkMastered, applyUsage, makeExpression,
     pickCue, upgrade, parseDomain, parseImport, weeklyProgress, rolePlayPick,
     hintPattern, sessionSteps, choiceOptions,
+    REPORT_RESULTS, buildRolePlayPrompt, parseRolePlayReport,
   };
 })();
 
