@@ -103,10 +103,11 @@ const ExprCore = (() => {
     return idx;
   }
 
-  // grade: 'forgot' | 'partly' | 'got'. Повертає нову копію картки.
-  function schedule(card, grade, today) {
+  // grade: 'forgot' | 'partly' | 'got'; cueIndex — номер показаної ситуації. Повертає нову копію картки.
+  function schedule(card, grade, today, cueIndex) {
     if (!GRADES.includes(grade)) throw new Error('Unknown grade: ' + grade);
     const c = { ...card };
+    if (cueIndex !== undefined) c.last_cue_index = cueIndex;
     if (c.status === 'mastered') {
       c.interval_days = MASTERED_INTERVAL;
     } else {
@@ -134,9 +135,37 @@ const ExprCore = (() => {
     return { fresh: fresh.size, reviews: reviews.size };
   }
 
+  const DEFAULT_LIFE_SHARE = 0.4;
+  const isLife = c => c.domain === 'life';
+
+  // Бере з упорядкованого списку не більше limit карток так, щоб «життя» мало приблизно lifeShare місць.
+  // Якщо в одній сфері карток бракує, вільні місця дістаються іншій.
+  function takeByShare(list, limit, lifeShare) {
+    if (limit <= 0) return [];
+    if (list.length <= limit) return list;
+    const life = list.filter(isLife), work = list.filter(c => !isLife(c));
+    let nLife = Math.min(life.length, Math.round(limit * lifeShare));
+    const nWork = Math.min(work.length, limit - nLife);
+    nLife = Math.min(life.length, limit - nWork);
+    const chosen = new Set([...life.slice(0, nLife), ...work.slice(0, nWork)]);
+    return list.filter(c => chosen.has(c));
+  }
+
+  // Чергує сфери, зберігаючи порядок усередині кожної.
+  function interleave(list) {
+    const life = list.filter(isLife), work = list.filter(c => !isLife(c));
+    const out = [];
+    while (life.length || work.length) {
+      if (work.length) out.push(work.shift());
+      if (life.length) out.push(life.shift());
+    }
+    return out;
+  }
+
   // План на день. Прострочені понад ліміт просто лишаються простроченими й ідуть першими завтра:
   // окремого лічильника боргу немає.
   function planDay(cards, today, done, settings) {
+    const share = settings.lifeShare ?? DEFAULT_LIFE_SHARE;
     const due = cards
       .filter(c => (c.status === 'active' || c.status === 'mastered') && !isNew(c) && c.due_date && c.due_date <= today)
       .sort((a, b) => a.due_date.localeCompare(b.due_date) || String(a.created_at).localeCompare(String(b.created_at)));
@@ -144,20 +173,58 @@ const ExprCore = (() => {
       .filter(c => c.status === 'active' && isNew(c))
       .sort((a, b) => String(a.activated_at || '').localeCompare(String(b.activated_at || '')) || String(a.created_at).localeCompare(String(b.created_at)));
     return {
-      reviews: due.slice(0, Math.max(0, settings.reviewsPerDay - done.reviews)),
-      fresh: fresh.slice(0, Math.max(0, settings.newPerDay - done.fresh)),
+      reviews: interleave(takeByShare(due, Math.max(0, settings.reviewsPerDay - done.reviews), share)),
+      fresh: interleave(takeByShare(fresh, Math.max(0, settings.newPerDay - done.fresh), share)),
     };
   }
 
-  // Переводить вирази з черги в активні, поки є вільні місця. Повертає змінені копії.
-  function promote(cards, activeMax, today) {
-    const active = cards.filter(c => c.status === 'active').length;
-    const free = Math.max(0, activeMax - active);
-    return cards
+  // Переводить вирази з черги в активні, поки є вільні місця, з урахуванням частки «життя»
+  // серед усіх активних. Повертає змінені копії.
+  function promote(cards, activeMax, today, lifeShare = DEFAULT_LIFE_SHARE) {
+    const active = cards.filter(c => c.status === 'active');
+    const free = Math.max(0, activeMax - active.length);
+    const queued = cards
       .filter(c => c.status === 'queued')
-      .sort((a, b) => String(a.created_at).localeCompare(String(b.created_at)))
-      .slice(0, free)
-      .map(c => ({ ...c, status: 'active', activated_at: today }));
+      .sort((a, b) => String(a.created_at).localeCompare(String(b.created_at)));
+    const qLife = queued.filter(isLife), qWork = queued.filter(c => !isLife(c));
+    let picked;
+    if (!qLife.length || !qWork.length) picked = queued.slice(0, free);
+    else {
+      const lifeWanted = Math.max(0, Math.round(activeMax * lifeShare) - active.filter(isLife).length);
+      let nLife = Math.min(qLife.length, lifeWanted, free);
+      const nWork = Math.min(qWork.length, free - nLife);
+      nLife = Math.min(qLife.length, free - nWork);
+      picked = [...qLife.slice(0, nLife), ...qWork.slice(0, nWork)];
+    }
+    return picked.map(c => ({ ...c, status: 'active', activated_at: today }));
+  }
+
+  // ---------- ситуації ----------
+  // Ситуація, відмінна від показаної минулого разу; якщо вона одна, показується вона.
+  function pickCue(card, rng = Math.random) {
+    const cues = (card.cues_uk || []).map((text, index) => ({ text, index })).filter(c => c.text);
+    if (!cues.length) return { index: null, text: '' };
+    const others = cues.length > 1 ? cues.filter(c => c.index !== card.last_cue_index) : cues;
+    return others[Math.min(others.length - 1, Math.floor(rng() * others.length))];
+  }
+
+  // Доповнює вирази зі старих версій новими полями. Старе cue_uk лишається в записі.
+  function upgrade(c) {
+    if (Array.isArray(c.cues_uk) && (c.domain === 'work' || c.domain === 'life') && typeof c.image_note === 'string' && c.last_cue_index !== undefined) return c;
+    return {
+      ...c,
+      cues_uk: Array.isArray(c.cues_uk) ? c.cues_uk : c.cue_uk ? [c.cue_uk] : [],
+      domain: c.domain === 'life' ? 'life' : 'work',
+      image_note: typeof c.image_note === 'string' ? c.image_note : '',
+      last_cue_index: c.last_cue_index ?? null,
+    };
+  }
+
+  function parseDomain(s) {
+    const v = String(s ?? '').trim().toLowerCase();
+    if (['робота', 'work'].includes(v)) return 'work';
+    if (['життя', 'life'].includes(v)) return 'life';
+    return null;
   }
 
   function checkMastered(card, today) {
@@ -175,11 +242,16 @@ const ExprCore = (() => {
   }
 
   function makeExpression(f, source, createdAt) {
+    const cues = (Array.isArray(f.cues_uk) ? f.cues_uk : [f.cue_uk]).map(s => String(s ?? '').trim()).filter(Boolean).slice(0, 3);
     return {
       id: 'x' + createdAt.toString(36) + Math.random().toString(36).slice(2, 8),
       expression: String(f.expression || '').trim(),
       meaning_uk: String(f.meaning_uk || '').trim(),
-      cue_uk: String(f.cue_uk || '').trim(),
+      cues_uk: cues,
+      cue_uk: cues[0] || '',
+      last_cue_index: null,
+      image_note: String(f.image_note || '').trim(),
+      domain: f.domain === 'life' ? 'life' : 'work',
       example_en: String(f.example_en || '').trim(),
       note: String(f.note || '').trim(),
       source: String(source || '').trim(),
@@ -197,7 +269,10 @@ const ExprCore = (() => {
   }
 
   // ---------- імпорт ----------
-  // Рядок: expression | meaning_uk | cue_uk | example_en | quote (quote не обов'язкове).
+  // Новий формат (8–9 полів):
+  //   вираз | значення | сфера | ситуація 1 | ситуація 2 | ситуація 3 | образ | приклад | цитата
+  // Старий формат (4–5 полів), сфера «робота»:
+  //   вираз | значення | ситуація | приклад | цитата
   function parseImport(text, existingExpressions = []) {
     const known = new Set(existingExpressions.map(expressionKey));
     const rows = [];
@@ -206,19 +281,36 @@ const ExprCore = (() => {
       if (!line || /^[|\s:-]+$/.test(line)) return; // порожній рядок або роздільник markdown-таблиці
       line = line.replace(/^\|/, '').replace(/\|$/, '');
       const parts = line.split('|').map(s => s.trim());
-      if (parts[0].toLowerCase() === 'expression') return; // рядок заголовків
-      const [expression = '', meaning_uk = '', cue_uk = '', example_en = '', note = ''] = parts;
-      const row = { line: i + 1, data: { expression, meaning_uk, cue_uk, example_en, note }, errors: [], warnings: [], duplicate: false };
-      if (parts.length < 4) row.errors.push('Потрібно щонайменше 4 поля через |');
-      if (parts.length > 5) row.errors.push('Забагато полів: можливо, знак | є всередині тексту');
-      const missing = [['expression', expression], ['meaning_uk', meaning_uk], ['cue_uk', cue_uk], ['example_en', example_en]]
-        .filter(([, v]) => !v).map(([k]) => k);
-      if (parts.length >= 4 && missing.length) row.errors.push('Порожні поля: ' + missing.join(', '));
+      if (['expression', 'вираз'].includes(parts[0].toLowerCase())) return; // рядок заголовків
+      const row = { line: i + 1, format: null, data: null, errors: [], warnings: [], duplicate: false };
+      let required;
+      if (parts.length >= 8 && parts.length <= 9) {
+        const [expression, meaning_uk, dom, c1, c2, c3, image_note, example_en, note = ''] = parts;
+        const domain = parseDomain(dom);
+        row.format = 'new';
+        row.data = { expression, meaning_uk, domain: domain || 'work', cues_uk: [c1, c2, c3].filter(Boolean), image_note, example_en, note };
+        if (!domain) row.errors.push(`Сфера має бути «робота» або «життя», а не «${dom}»`);
+        required = [['вираз', expression], ['значення', meaning_uk], ['ситуація 1', c1], ['приклад', example_en]];
+      } else {
+        const [expression = '', meaning_uk = '', cue = '', example_en = '', note = ''] = parts;
+        row.format = 'old';
+        row.data = { expression, meaning_uk, domain: 'work', cues_uk: cue ? [cue] : [], image_note: '', example_en, note };
+        required = [['вираз', expression], ['значення', meaning_uk], ['ситуація', cue], ['приклад', example_en]];
+        if (parts.length < 4 || (parts.length > 5 && parts.length < 8)) {
+          row.errors.push(`Полів ${parts.length}: потрібно 8–9 (новий формат) або 4–5 (старий)`);
+        } else if (parts.length > 9) {
+          row.errors.push('Забагато полів: можливо, знак | є всередині тексту');
+        }
+      }
+      const countOk = row.format === 'new' || (parts.length >= 4 && parts.length <= 5);
+      const missing = required.filter(([, v]) => !v).map(([k]) => k);
+      if (countOk && missing.length) row.errors.push('Порожні поля: ' + missing.join(', '));
+      const { expression, cues_uk } = row.data;
       if (expression && !expressionKey(expression)) row.errors.push('Вираз не містить слів');
       if (!row.errors.length) {
         if (tokenize(expression).length < 2) row.warnings.push('Одне слово, а не вираз');
         const req = analyse(expression).filter(it => it.kind === 'req').map(it => it.text);
-        if (req.some(w => tokenize(cue_uk).includes(w))) row.warnings.push('Підказка cue_uk містить англійські слова виразу');
+        if (cues_uk.some(cue => req.some(w => tokenize(cue).includes(w)))) row.warnings.push('Ситуація містить англійські слова виразу');
         const key = expressionKey(expression);
         if (known.has(key)) row.duplicate = true;
         else known.add(key);
@@ -229,7 +321,11 @@ const ExprCore = (() => {
   }
 
   // ---------- прогрес ----------
-  function weeklyProgress(cards, usageLogs, today, weeks = 8) {
+  // domain: 'work' | 'life' | null (усі сфери)
+  function weeklyProgress(allCards, allLogs, today, weeks = 8, domain = null) {
+    const cards = domain ? allCards.filter(c => (domain === 'life') === isLife(c)) : allCards;
+    const ids = new Set(cards.map(c => c.id));
+    const usageLogs = allLogs.filter(l => ids.has(l.itemId));
     const current = weekStart(today);
     const list = [];
     for (let k = weeks - 1; k >= 0; k--) {
@@ -251,26 +347,35 @@ const ExprCore = (() => {
     };
   }
 
-  // До 5 виразів із сьогоднішніх повторень: спершу «Забула», потім «Частково», потім решта.
-  function rolePlayPick(logs, cardsById, today, max = 5) {
+  // До max виразів однієї сфери для діалогу: спершу сьогоднішні «Забула», потім «Частково», потім решта
+  // сьогоднішніх; якщо їх менше, доповнює активними виразами цієї сфери, які ще не вживались без підказки.
+  function rolePlayPick(logs, cardsById, today, max = 5, domain = null) {
     const rank = { forgot: 0, partly: 1, got: 2 };
+    const inDomain = c => c && (!domain || (domain === 'life') === isLife(c));
     const worst = new Map();
     logs.forEach((l, order) => {
-      if (l.type !== 'expr' || dayKey(new Date(l.ts)) !== today || !cardsById[l.itemId]) return;
+      if (l.type !== 'expr' || dayKey(new Date(l.ts)) !== today || !inDomain(cardsById[l.itemId])) return;
       const prev = worst.get(l.itemId);
       if (!prev || rank[l.grade] < rank[prev.grade]) worst.set(l.itemId, { grade: l.grade, order });
     });
-    return [...worst.entries()]
+    const ids = [...worst.entries()]
       .sort((a, b) => rank[a[1].grade] - rank[b[1].grade] || a[1].order - b[1].order)
-      .slice(0, max)
-      .map(([id]) => cardsById[id].expression);
+      .map(([id]) => id);
+    if (ids.length < max) {
+      const weak = c => (c.last_result == null ? 1.5 : rank[c.last_result]) * 10 + (c.consecutive_correct || 0);
+      Object.values(cardsById)
+        .filter(c => inDomain(c) && c.status === 'active' && !(c.used_unprompted_count || 0) && !worst.has(c.id))
+        .sort((a, b) => weak(a) - weak(b) || String(a.created_at).localeCompare(String(b.created_at)))
+        .forEach(c => ids.push(c.id));
+    }
+    return ids.slice(0, max).map(id => cardsById[id].expression);
   }
 
   return {
-    INTERVALS, MASTERED_INTERVAL, MASTERED_AFTER,
+    INTERVALS, MASTERED_INTERVAL, MASTERED_AFTER, DEFAULT_LIFE_SHARE,
     dayKey, addDays, weekStart, tokenize, analyse, expressionKey, compare,
     schedule, isNew, countDone, planDay, promote, checkMastered, applyUsage, makeExpression,
-    parseImport, weeklyProgress, rolePlayPick,
+    pickCue, upgrade, parseDomain, parseImport, weeklyProgress, rolePlayPick,
   };
 })();
 

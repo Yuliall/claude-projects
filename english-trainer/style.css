@@ -233,6 +233,21 @@ tr.row-bad td { background: var(--bad-soft); }
 .week-bar > span { display: block; height: 100%; background: var(--accent); border-radius: 99px; }
 .plain-list { margin: 0; padding-left: 1.2em; }
 .plain-list li { margin-bottom: 4px; }
+.badge.dom-work { background: var(--accent-soft); color: var(--accent); }
+.badge.dom-life { background: var(--ok-soft); color: var(--ok); }
+.ex-image { margin-top: 12px; padding: 10px 12px; border-radius: 10px; background: var(--warn-soft); font-size: 1.05rem; }
+.ex-image .muted { display: block; margin-bottom: 2px; }
+.image-prompt { margin-top: 12px; }
+.field-label { font-size: .9rem; color: var(--muted); }
+.cues-edit { display: flex; flex-direction: column; gap: 6px; }
+.cue-row { display: flex; gap: 6px; align-items: flex-start; }
+.cue-row textarea { flex: 1; }
+.cues-edit > .btn { align-self: flex-start; }
+.domain-grid { display: grid; grid-template-columns: 1fr; gap: 0 16px; }
+@media (min-width: 900px) { .domain-grid { grid-template-columns: 1fr 1fr; } }
+.domain-grid h3 { margin-top: 18px; }
+.stats.compact .stat { padding: 10px; }
+.stats.compact .stat b { font-size: 1.3rem; }
 .diff { margin-top: 10px; text-align: center; font-size: 1.1rem; }
 .diff mark.ins { background: var(--ok-soft); color: var(--ok); font-weight: 600; padding: 0 3px; border-radius: 3px; }
 .diff s.del { color: var(--bad); }

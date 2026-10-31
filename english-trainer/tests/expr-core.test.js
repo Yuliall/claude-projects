@@ -165,9 +165,9 @@ test('імпорт: 5 полів і 4 поля без цитати', () => {
 test('імпорт: помилки валідації з номером рядка', () => {
   const rows = X.parseImport('\nonly | two\nflag a concern |  | cue | example\na | b | c | d | e | f');
   assert.equal(rows[0].line, 2);
-  assert.match(rows[0].errors[0], /4 поля/);
-  assert.match(rows[1].errors[0], /meaning_uk/);
-  assert.match(rows[2].errors.join(), /Забагато/);
+  assert.match(rows[0].errors[0], /Полів 2/);
+  assert.match(rows[1].errors[0], /значення/);
+  assert.match(rows[2].errors.join(), /Полів 6/);
 });
 
 test('імпорт: дублі за виразом пропускаються, і з наявних, і всередині вставки', () => {
@@ -190,9 +190,9 @@ test('імпорт: заголовок і markdown-таблиця', () => {
   assert.deepEqual(rows[0].errors, []);
 });
 
-test('імпорт: попередження, якщо cue_uk містить англійські слова виразу або це одне слово', () => {
+test('імпорт: попередження, якщо ситуація містить англійські слова виразу або це одне слово', () => {
   const [a, b] = X.parseImport('flag a concern | m | Треба flag це | e\nleverage | m | c | e');
-  assert.match(a.warnings.join(), /cue_uk/);
+  assert.match(a.warnings.join(), /Ситуація/);
   assert.match(b.warnings.join(), /Одне слово/);
 });
 
@@ -220,4 +220,158 @@ test('рольова гра: до 5 виразів, спершу «Забула�
   const logs = cards.map((c, i) => ({ type: 'expr', itemId: c.id, grade: grades[i], ts: ts + i }));
   logs.push({ type: 'expr', itemId: cards[0].id, grade: 'forgot', ts: ts - 86400000 });
   assert.deepEqual(X.rolePlayPick(logs, byId, '2026-11-01'), ['expr 3', 'expr 1', 'expr 5', 'expr 0', 'expr 2']);
+});
+
+// ---------- образ, ситуації, сфери ----------
+
+const SAMPLE_NEW = [
+  'park something (for now) | відкласти питання на потім | робота | Колега хоче обговорити бюджет, а це забере всю зустріч | На планерці виникло питання, яке стосується лише двох людей | Клієнт питає про функцію, рішення щодо якої ще не ухвалене | поставити машину на стоянку: питання стоїть, потім його заберуть | Let\'s park the pricing question for now.',
+  'circle back to something | повернутися до теми пізніше | робота | Ви не маєте даних для відповіді і обіцяєте повернутися | Обговорення пішло вбік, і ви хочете повернутися до головного | | зробити коло і прийти в ту саму точку | I\'ll circle back to this after the call.',
+  'run errands | бігати у справах (магазин, пошта, банк) | життя | Подруга кличе на каву в суботу зранку, а у вас купа дрібних справ | Ви пояснюєте, чому не відповідали на повідомлення пів дня | | бігти по маленьких колах: пошта, аптека, магазин | I need to run some errands before lunch. | I had to run errands',
+].join('\n');
+
+test('міграція: cue_uk стає першою ситуацією, додаються сфера й образ, старе поле лишається', () => {
+  const old = { id: 'o1', expression: 'flag a concern', meaning_uk: 'm', cue_uk: 'Ти бачиш ризик.', example_en: 'e', status: 'active' };
+  const up = X.upgrade(old);
+  assert.deepEqual(up.cues_uk, ['Ти бачиш ризик.']);
+  assert.equal(up.cue_uk, 'Ти бачиш ризик.');
+  assert.equal(up.domain, 'work');
+  assert.equal(up.image_note, '');
+  assert.equal(up.last_cue_index, null);
+  assert.equal(up.status, 'active');
+  assert.equal(X.upgrade(up), up, 'повторна міграція нічого не змінює');
+  assert.deepEqual(X.upgrade({ ...old, cue_uk: '' }).cues_uk, []);
+  assert.equal(X.upgrade({ ...old, domain: 'life' }).domain, 'life');
+});
+
+test('ситуація: ніколи не повторює показану минулого разу', () => {
+  const c = { cues_uk: ['a', 'b', 'c'], last_cue_index: 1 };
+  for (let r = 0; r < 1; r += 0.05) assert.notEqual(X.pickCue(c, () => r).index, 1);
+  const seen = new Set();
+  for (let r = 0; r < 1; r += 0.05) seen.add(X.pickCue(c, () => r).index);
+  assert.deepEqual([...seen].sort(), [0, 2], 'обидві інші ситуації можливі');
+});
+
+test('ситуація: одна показується завжди, порожніх немає, без попередньої — будь-яка', () => {
+  assert.equal(X.pickCue({ cues_uk: ['лише одна'], last_cue_index: 0 }).text, 'лише одна');
+  assert.deepEqual(X.pickCue({ cues_uk: [], last_cue_index: null }), { index: null, text: '' });
+  assert.equal(X.pickCue({ cues_uk: ['a', '', 'c'], last_cue_index: 0 }, () => 0.99).index, 2);
+  assert.equal(X.pickCue({ cues_uk: ['a', 'b'], last_cue_index: null }, () => 0).index, 0);
+});
+
+test('ситуація: оцінка запам\'ятовує показану ситуацію', () => {
+  const c = X.schedule(card({ status: 'active', cues_uk: ['a', 'b'] }), 'got', '2026-11-01', 1);
+  assert.equal(c.last_cue_index, 1);
+  assert.equal(X.pickCue(c, () => 0.99).index, 0);
+});
+
+const dueCard = (domain, i) => card({ status: 'active', domain, last_result: 'got', interval_days: 3, due_date: '2026-10-' + String(10 + (i % 20)).padStart(2, '0') });
+const freshCard = domain => card({ status: 'active', domain });
+const NO_DONE = { reviews: 0, fresh: 0 };
+const countLife = list => list.filter(c => c.domain === 'life').length;
+
+test('частка сфер: 40% «життя» серед повторень і нових, коли карток більше за ліміт', () => {
+  const cards = [
+    ...Array.from({ length: 20 }, (_, i) => dueCard('work', i)), ...Array.from({ length: 20 }, (_, i) => dueCard('life', i)),
+    ...Array.from({ length: 10 }, () => freshCard('work')), ...Array.from({ length: 10 }, () => freshCard('life')),
+  ];
+  const p = X.planDay(cards, '2026-11-01', NO_DONE, { ...LIMITS, lifeShare: 0.4 });
+  assert.equal(p.reviews.length, 15);
+  assert.equal(countLife(p.reviews), 6);
+  assert.equal(p.fresh.length, 7);
+  assert.equal(countLife(p.fresh), 3);
+});
+
+test('частка сфер: якщо в одній сфері карток мало, місця дістаються іншій', () => {
+  const few = [...Array.from({ length: 20 }, (_, i) => dueCard('work', i)), dueCard('life', 0), dueCard('life', 1)];
+  let p = X.planDay(few, '2026-11-01', NO_DONE, { ...LIMITS, lifeShare: 0.4 });
+  assert.equal(p.reviews.length, 15);
+  assert.equal(countLife(p.reviews), 2);
+  const onlyLife = Array.from({ length: 20 }, (_, i) => dueCard('life', i));
+  p = X.planDay(onlyLife, '2026-11-01', NO_DONE, { ...LIMITS, lifeShare: 0.4 });
+  assert.equal(p.reviews.length, 15);
+});
+
+test('частка сфер: усередині сфери спершу найстаріші, сфери в сесії чергуються', () => {
+  const cards = [...Array.from({ length: 20 }, (_, i) => dueCard('work', i)), ...Array.from({ length: 20 }, (_, i) => dueCard('life', i))];
+  const p = X.planDay(cards, '2026-11-01', NO_DONE, { ...LIMITS, lifeShare: 0.4 });
+  const lifeDates = p.reviews.filter(c => c.domain === 'life').map(c => c.due_date);
+  assert.deepEqual(lifeDates, [...lifeDates].sort());
+  assert.equal(lifeDates[0], '2026-10-10');
+  assert.deepEqual(p.reviews.slice(0, 4).map(c => c.domain), ['work', 'life', 'work', 'life']);
+});
+
+test('частка сфер: черга заповнює спільний ліміт 20 з урахуванням частки «життя»', () => {
+  const queued = [...Array.from({ length: 15 }, () => card({ status: 'queued', domain: 'work' })), ...Array.from({ length: 15 }, () => card({ status: 'queued', domain: 'life' }))];
+  const promoted = X.promote(queued, 20, '2026-11-01', 0.4);
+  assert.equal(promoted.length, 20);
+  assert.equal(countLife(promoted), 8);
+  const onlyWork = Array.from({ length: 25 }, () => card({ status: 'queued', domain: 'work' }));
+  assert.equal(X.promote(onlyWork, 20, '2026-11-01', 0.4).length, 20, 'без карток «життя» всі місця для роботи');
+});
+
+test('імпорт: новий формат з 8 полями, порожні ситуації 2–3 і цитата необов\'язкові', () => {
+  const rows = X.parseImport(SAMPLE_NEW);
+  assert.ok(rows.every(r => !r.errors.length && r.format === 'new'), JSON.stringify(rows.map(r => r.errors)));
+  assert.deepEqual(rows.map(r => r.data.domain), ['work', 'work', 'life']);
+  assert.deepEqual(rows.map(r => r.data.cues_uk.length), [3, 2, 2]);
+  assert.equal(rows[0].data.image_note, 'поставити машину на стоянку: питання стоїть, потім його заберуть');
+  assert.equal(rows[0].data.example_en, "Let's park the pricing question for now.");
+  assert.equal(rows[0].data.note, '');
+  assert.equal(rows[2].data.note, 'I had to run errands');
+  const c = X.makeExpression(rows[2].data, '2026-11-01', Date.now());
+  assert.equal(c.domain, 'life');
+  assert.equal(c.cue_uk, rows[2].data.cues_uk[0]);
+  assert.equal(c.image_note, 'бігти по маленьких колах: пошта, аптека, магазин');
+});
+
+test('імпорт: новий формат — помилки сфери, ситуації 1 і кількості полів', () => {
+  const rows = X.parseImport([
+    'run errands | справи | дім | s1 | | | образ | I run errands.',
+    'run errands | справи | життя | | s2 | | образ | I run errands.',
+    'a b | c | життя | s1 | s2 | s3 | e',
+  ].join('\n'));
+  assert.match(rows[0].errors.join(), /робота.*життя/);
+  assert.match(rows[1].errors.join(), /ситуація 1/);
+  assert.match(rows[2].errors.join(), /Полів 7/);
+});
+
+test('імпорт: старий формат з 5 полями працює далі, сфера «робота»', () => {
+  const [r] = X.parseImport('flag a concern | висловити застереження | Ти бачиш ризик у плані. | I want to flag a concern. | цитата');
+  assert.equal(r.format, 'old');
+  assert.deepEqual(r.errors, []);
+  assert.equal(r.data.domain, 'work');
+  assert.deepEqual(r.data.cues_uk, ['Ти бачиш ризик у плані.']);
+  assert.equal(r.data.image_note, '');
+  assert.equal(r.data.note, 'цитата');
+});
+
+test('імпорт: дублі за виразом між форматами пропускаються', () => {
+  const rows = X.parseImport(SAMPLE_NEW + '\npark something | відкласти | c | e', ['run errands']);
+  assert.deepEqual(rows.map(r => r.duplicate), [false, false, true, true]);
+});
+
+test('діалог: вирази лише однієї сфери, доповнення активними невжитими', () => {
+  const ts = new Date(2026, 10, 1, 9).getTime();
+  const w1 = card({ expression: 'w1', domain: 'work', status: 'active' });
+  const l1 = card({ expression: 'l1', domain: 'life', status: 'active' });
+  const l2 = card({ expression: 'l2', domain: 'life', status: 'active', last_result: 'forgot' });
+  const l3 = card({ expression: 'l3', domain: 'life', status: 'active', used_unprompted_count: 1 });
+  const byId = Object.fromEntries([w1, l1, l2, l3].map(c => [c.id, c]));
+  const logs = [{ type: 'expr', itemId: w1.id, grade: 'forgot', ts }, { type: 'expr', itemId: l1.id, grade: 'got', ts }];
+  assert.deepEqual(X.rolePlayPick(logs, byId, '2026-11-01', 5, 'life'), ['l1', 'l2']);
+  assert.deepEqual(X.rolePlayPick(logs, byId, '2026-11-01', 5, 'work'), ['w1']);
+});
+
+test('прогрес окремо для кожної сфери', () => {
+  const day = d => new Date(2026, 9, d, 12).getTime();
+  const w = card({ status: 'active', domain: 'work', activated_at: '2026-10-12', used_unprompted_count: 1 });
+  const l = card({ status: 'active', domain: 'life', activated_at: '2026-10-12' });
+  const logs = [{ type: 'usage', kind: 'unprompted', itemId: w.id, ts: day(27) }];
+  const pw = X.weeklyProgress([w, l], logs, '2026-10-29', 2, 'work');
+  const pl = X.weeklyProgress([w, l], logs, '2026-10-29', 2, 'life');
+  assert.equal(pw.weeks[1].unprompted, 1);
+  assert.equal(pl.weeks[1].unprompted, 0);
+  assert.deepEqual(pw.earlier, { total: 1, used: 1 });
+  assert.deepEqual(pl.never.map(c => c.id), [l.id]);
 });
