@@ -428,3 +428,68 @@ test('варіанти для вибору: правильний вираз, б�
   assert.ok(opts.includes('circle back to something') && opts.includes('park something (for now)'));
   assert.deepEqual(X.choiceOptions(target, [target], 4), ['push back on something']);
 });
+
+// ---------- рольова гра ----------
+
+const RP = [
+  card({ status: 'active', domain: 'work', expression: 'push back on something', meaning_uk: 'заперечити', cues_uk: ['Клієнт вимагає знижку'] }),
+  card({ status: 'active', domain: 'work', expression: 'circle back to something', meaning_uk: 'повернутися пізніше', cues_uk: [] }),
+  card({ status: 'active', domain: 'life', expression: 'run errands', meaning_uk: 'бігати у справах', cues_uk: ['Субота зранку'] }),
+];
+
+test('промт рольової гри: вирази, сцена, формат звіту', () => {
+  const p = X.buildRolePlayPrompt({ expressions: RP.slice(0, 2), domain: 'work', mode: 'text', hints: 'full' });
+  assert.match(p, /Сцена: робоча/);
+  assert.match(p, /1\. push back on something — заперечити/);
+  assert.match(p, /ситуації: Клієнт вимагає знижку/);
+  assert.match(p, /Формат: переписка/);
+  assert.match(p, /вираз \| результат \| моя фраза/);
+  assert.match(p, /без підказки \/ з підказкою \/ не вжито/);
+  assert.match(p, /будь-яку правильну форму/);
+  assert.doesNotMatch(p, /\[підказка:/, 'на повному рівні шаблони перших літер не потрібні');
+});
+
+test('промт рольової гри: рівні підказок і голос', () => {
+  const letters = X.buildRolePlayPrompt({ expressions: [RP[0]], domain: 'work', mode: 'text', hints: 'letters' });
+  assert.match(letters, /лише значення українською, без англійських виразів/);
+  assert.match(letters, /\[підказка: p___ b___ o_ something\]/);
+  const none = X.buildRolePlayPrompt({ expressions: [RP[2]], domain: 'life', mode: 'voice', hints: 'none' });
+  assert.match(none, /Не показуй список і не називай вирази/);
+  assert.match(none, /Сцена: побутова/);
+  assert.match(none, /Формат: голос/);
+  assert.match(none, /«report»/);
+  const full = X.buildRolePlayPrompt({ expressions: [RP[0]], domain: 'work', mode: 'text', hints: 'full' });
+  assert.match(full, /у звіті всі вжиті вирази позначай «з підказкою»/);
+});
+
+test('звіт рольової гри: блок коду, інший текст ігнорується, вирази знаходяться за змістом', () => {
+  const rows = X.parseRolePlayReport([
+    'Поради: менше пауз.',
+    '```',
+    'вираз | результат | моя фраза',
+    'push back on sth | без підказки | I pushed back on the discount.',
+    '2. circle back to something | з підказкою | Let\'s circle back to it later.',
+    '| run errands | не вжито | |',
+    '```',
+  ].join('\n'), RP);
+  assert.equal(rows.length, 3);
+  assert.deepEqual(rows.map(r => [r.card?.expression, r.result]), [
+    ['push back on something', 'unprompted'], ['circle back to something', 'hint'], ['run errands', 'none'],
+  ]);
+  assert.equal(rows[0].phrase, 'I pushed back on the discount.');
+  assert.ok(rows.every(r => !r.errors.length));
+});
+
+test('звіт рольової гри: помилки й дублі', () => {
+  const rows = X.parseRolePlayReport([
+    'take over something | без підказки | x',
+    'run errands | майже | x',
+    'run errands | з підказкою | I ran errands.',
+    'Run errands | without hint | I had to run errands.',
+  ].join('\n'), RP);
+  assert.match(rows[0].errors.join(), /немає серед/);
+  assert.match(rows[1].errors.join(), /Незрозумілий результат/);
+  assert.equal(rows[2].duplicate, true, 'гірший результат того самого виразу не рахується');
+  assert.equal(rows[3].duplicate, false);
+  assert.equal(rows[3].result, 'unprompted');
+});

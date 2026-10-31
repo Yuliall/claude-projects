@@ -41,26 +41,6 @@ async function exprPlan() {
   return { all, lim, today, ...ExprCore.planDay(all, today, ExprCore.countDone(logs, today), lim) };
 }
 
-async function copyDialog(domain) {
-  const [all, logs] = await Promise.all([loadExpressions(), DB.since('log', 'ts', startOfDay())]);
-  const list = ExprCore.rolePlayPick(logs, Object.fromEntries(all.map(c => [c.id, c])), ExprCore.dayKey(), 5, domain);
-  if (!list.length) { toast(`Немає активних виразів у сфері «${DOMAINS[domain]}»`); return; }
-  await copyText(list.join(', '));
-  toast(`Скопійовано (${DOMAINS[domain]}): ${list.join(', ')}`);
-}
-
-// Сцена буде або робочою, або побутовою, тому спершу вибір сфери.
-function chooseDialog() {
-  const m = modal(`<h3>Скопіювати для діалогу</h3>
-    <p class="muted">Яка буде сцена? Скопіюється до 5 виразів цієї сфери: спершу ті, що сьогодні були «Забула» і «Частково».</p>
-    <div class="btns">
-      <button class="btn primary" data-dom="work">Робота</button>
-      <button class="btn primary" data-dom="life">Життя</button>
-      <button class="btn ghost" data-m="close">Скасувати</button>
-    </div>`);
-  $$('[data-dom]', m.el).forEach(b => { b.onclick = async () => { m.close(); await copyDialog(b.dataset.dom); }; });
-}
-
 const fmtDay = key => key ? key.split('-').reverse().slice(0, 2).join('.') : '';
 
 function exprDueText(c, today) {
@@ -100,13 +80,14 @@ Views.expr = async () => {
       <div><h1>Вирази</h1><p class="muted">Активних ${active.length} з ${lim.activeMax} (робота ${active.filter(c => c.domain !== 'life').length}, життя ${active.filter(c => c.domain === 'life').length})${queued.length ? ` · у черзі ${queued.length}` : ''} · засвоєно ${mastered.length}</p></div>
       <div class="btns">
         <a class="btn primary" href="#/expr-review" ${n ? '' : 'aria-disabled="true"'}>Повторити: ${n}</a>
+        <a class="btn" href="#/roleplay">Рольова гра</a>
         <a class="btn" href="#/expr-import">Імпорт</a>
         <a class="btn" href="#/expr-progress">Прогрес</a>
       </div>
     </div>
     <div class="panel">
       <div class="toolbar"><h3>Активні</h3></div>
-      <p class="muted small">Після уроку або рольової гри з Claude позначте, які вирази ви вжили в мовленні. Два вживання без підказки роблять вираз засвоєним, і з черги приходить наступний.</p>
+      <p class="muted small">Результати <a href="#/roleplay">рольової гри</a> додаються сюди автоматично зі звіту Claude. Після уроку чи живої розмови позначайте вживання кнопками нижче. Два вживання без підказки роблять вираз засвоєним, і з черги приходить наступний.</p>
       <div id="activeList">${active.length ? active.map(c => exprRow(c, today)).join('') : '<p class="muted">Активних виразів немає. Додайте їх через <a href="#/expr-import">Імпорт</a>.</p>'}</div>
     </div>
     ${queued.length ? `<details class="panel"><summary>Черга (${queued.length})</summary>
@@ -324,11 +305,10 @@ function runExprSession(plan) {
       <p>Згадала: <b>${count('got')}</b> · частково: <b>${count('partly')}</b> · забула: <b>${count('forgot')}</b></p>
       ${weak.length ? `<h3>Варто вжити в розмові</h3><ul class="wrong-list">${weak.map(r => `<li><b>${esc(r.c.expression)}</b> — ${esc(r.c.meaning_uk)}</li>`).join('')}</ul>` : ''}
       <div class="btns center">
-        <button class="btn primary" data-act="dialog">Скопіювати для діалогу</button>
+        <a class="btn primary" href="#/roleplay">Рольова гра з цими виразами</a>
         <a class="btn" href="#/expr">Усі вирази</a>
         <a class="btn" href="#/">На головну</a>
       </div></div>`;
-    actions.dialog = chooseDialog;
   };
 
   step();
@@ -574,4 +554,141 @@ Views['expr-progress'] = async () => {
     <div class="page-head"><div><a href="#/expr" class="crumb">Вирази</a><h1>Прогрес</h1></div></div>
     <p class="muted">Разом цього тижня вжито без підказки: ${total.weeks[total.weeks.length - 1].unprompted}; засвоєно: ${all.filter(c => c.status === 'mastered').length}.</p>
     <div class="domain-grid">${domainPanel('work')}${domainPanel('life')}</div>`;
+};
+
+// ---------- рольова гра ----------
+
+const RP_KEY = 'et-roleplay';
+const RP_MAX = 5;
+const RP_HINTS = [
+  ['full', 'З підказками', 'Claude показує список виразів зі значеннями й нагадує вираз, якщо застрягла. Вживання рахуються «з підказкою». Для нових виразів.'],
+  ['letters', 'Лише перші літери', 'Видно тільки значення українською. На слово «hint» Claude дає перші літери. До підказки — «без підказки».'],
+  ['none', 'Без підказок', 'Claude не називає ні виразів, ні значень. Як у справжній розмові.'],
+];
+const RP_MODES = [
+  ['text', 'Переписка', 'Пишете репліки в чаті з Claude.'],
+  ['voice', 'Голос', 'У застосунку Claude на телефоні вставте промт і перейдіть у голосовий режим. Наприкінці скажіть «report».'],
+];
+
+function loadRp() {
+  try { return { domain: 'work', mode: 'text', hints: 'letters', ...JSON.parse(localStorage.getItem(RP_KEY) || '{}') }; }
+  catch { return { domain: 'work', mode: 'text', hints: 'letters' }; }
+}
+function saveRp(st) { try { localStorage.setItem(RP_KEY, JSON.stringify(st)); } catch {} }
+
+const radioGroup = (name, items, value) => items.map(([v, label, help]) =>
+  `<label class="check rp-option"><input type="radio" name="${name}" value="${v}" ${v === value ? 'checked' : ''}>
+    <span><b>${label}</b>${help ? `<span class="muted small">${help}</span>` : ''}</span></label>`).join('');
+
+Views.roleplay = async () => {
+  const [all, logs] = await Promise.all([loadExpressions(), DB.since('log', 'ts', startOfDay())]);
+  const today = ExprCore.dayKey();
+  const byId = Object.fromEntries(all.map(c => [c.id, c]));
+  const st = loadRp();
+
+  app().innerHTML = `
+    <div class="page-head"><div><a href="#/expr" class="crumb">Вирази</a><h1>Рольова гра</h1></div></div>
+    <div class="panel stack">
+      <h3>1. Налаштування сцени</h3>
+      <div class="rp-grid">
+        <fieldset class="rp-set"><legend>Сфера</legend>${radioGroup('rpDomain', [['work', 'Робота'], ['life', 'Життя']], st.domain)}</fieldset>
+        <fieldset class="rp-set"><legend>Формат</legend>${radioGroup('rpMode', RP_MODES, st.mode)}</fieldset>
+      </div>
+      <fieldset class="rp-set"><legend>Підказки</legend>${radioGroup('rpHints', RP_HINTS, st.hints)}</fieldset>
+      <fieldset class="rp-set"><legend>Вирази (до ${RP_MAX})</legend>
+        <p class="muted small">Відмічено найслабші: сьогоднішні «Забула» і «Частково», потім ті, що ще не звучали без підказки.</p>
+        <div id="rpList"></div>
+      </fieldset>
+      <div class="btns">
+        <button class="btn primary" data-act="rpCopy">Скопіювати промт</button>
+        <a class="btn ghost" href="https://claude.ai/new" target="_blank" rel="noopener">Відкрити Claude</a>
+      </div>
+      <p class="muted small">У промті видно вирази. Щоб не підглядати, скопіюйте його кнопкою і не перечитуйте: перша відповідь Claude його сховає.</p>
+    </div>
+    <div class="panel stack">
+      <h3>2. Звіт після гри</h3>
+      <p class="muted">Наприкінці Claude дає звіт: рядки <code>вираз | результат | моя фраза</code>. Скопіюйте його сюди, лічильники вживання оновляться самі.</p>
+      <textarea id="rpReport" rows="6" placeholder="push back on something | без підказки | I pushed back on the discount."></textarea>
+      <div class="btns"><button class="btn primary" data-act="rpCheck">Перевірити звіт</button></div>
+      <div id="rpPreview"></div>
+    </div>`;
+
+  const current = () => ({
+    domain: $('input[name=rpDomain]:checked').value,
+    mode: $('input[name=rpMode]:checked').value,
+    hints: $('input[name=rpHints]:checked').value,
+  });
+  const selected = () => $$('.rp-expr:checked').map(cb => byId[cb.value]);
+  const updateLimit = () => {
+    const n = $$('.rp-expr:checked').length;
+    $$('.rp-expr').forEach(cb => { cb.disabled = !cb.checked && n >= RP_MAX; });
+  };
+  const drawList = () => {
+    const domain = current().domain;
+    const pool = all
+      .filter(c => (c.status === 'active' || c.status === 'mastered') && (c.domain === 'life') === (domain === 'life'))
+      .sort((a, b) => (a.status === 'mastered') - (b.status === 'mastered') || (a.used_unprompted_count || 0) - (b.used_unprompted_count || 0));
+    const picked = new Set(ExprCore.rolePlayPick(logs, byId, today, RP_MAX, domain));
+    $('#rpList').innerHTML = pool.length ? pool.map(c => `<label class="check rp-expr-row">
+        <input type="checkbox" class="rp-expr" value="${c.id}" ${picked.has(c.expression) ? 'checked' : ''}>
+        <span><b>${esc(c.expression)}</b> <span class="muted">${esc(c.meaning_uk)}</span>
+          <span class="muted small">· без підказки: ${c.used_unprompted_count || 0}${c.status === 'mastered' ? ' · засвоєний' : ''}</span></span>
+      </label>`).join('') : `<p class="muted">У сфері «${DOMAINS[domain]}» ще немає активних виразів.</p>`;
+    updateLimit();
+  };
+  drawList();
+  app().onchange = e => {
+    if (e.target.name === 'rpDomain') drawList();
+    if (e.target.classList.contains('rp-expr')) updateLimit();
+    if (e.target.type === 'radio') saveRp(current());
+  };
+
+  actions.rpCopy = async () => {
+    const exprs = selected();
+    if (!exprs.length) { toast('Відмітьте хоча б один вираз'); return; }
+    const s = await getSettings();
+    await copyText(ExprCore.buildRolePlayPrompt({ ...current(), expressions: exprs, level: s.level || 'B1' }));
+    saveRp(current());
+    toast(`Промт скопійовано (${exprs.length} ${exprs.length === 1 ? 'вираз' : 'вирази'}). Вставте його в чат із Claude.`);
+  };
+
+  let rows = [];
+  actions.rpCheck = () => {
+    rows = ExprCore.parseRolePlayReport($('#rpReport').value, all);
+    const counted = rows.filter(r => !r.errors.length && !r.duplicate && r.result !== 'none');
+    const label = { unprompted: 'без підказки', hint: 'з підказкою', none: 'не вжито' };
+    $('#rpPreview').innerHTML = rows.length ? `
+      <div class="table-wrap"><table class="cards">
+        <thead><tr><th>Вираз</th><th>Результат</th><th>Ваша фраза</th></tr></thead>
+        <tbody>${rows.map(r => `<tr class="${r.errors.length ? 'row-bad' : r.duplicate ? 'dup' : ''}">
+          <td><b>${esc(r.card ? r.card.expression : r.expression)}</b></td>
+          <td>${r.errors.length ? `<span class="warn">${r.errors.map(esc).join('<br>')}</span>`
+            : `<span class="badge res-${r.result}">${label[r.result]}</span>${r.duplicate ? '<div class="muted small">повтор, не рахується</div>' : ''}`}</td>
+          <td class="ex">${esc(r.phrase)}</td>
+        </tr>`).join('')}</tbody>
+      </table></div>
+      <div class="btns"><button class="btn primary" data-act="rpSave" ${counted.length ? '' : 'disabled'}>Записати вживання: ${counted.length}</button></div>`
+      : '<p class="warn">У тексті немає рядків звіту. Скопіюйте блок, де кожен рядок має вигляд «вираз | результат | моя фраза».</p>';
+  };
+
+  actions.rpSave = async el => {
+    el.disabled = true;
+    const ts = Date.now();
+    let free = 0, hinted = 0;
+    const mastered = [];
+    for (const r of rows) {
+      if (r.errors.length || r.duplicate || r.result === 'none') continue;
+      const before = ExprCore.upgrade(await DB.get('expressions', r.card.id));
+      const upd = ExprCore.applyUsage(before, r.result, ts);
+      await DB.put('expressions', upd);
+      await DB.put('log', { ts, type: 'usage', itemId: upd.id, kind: r.result, source: 'roleplay', phrase: r.phrase });
+      r.result === 'unprompted' ? free++ : hinted++;
+      if (upd.status === 'mastered' && before.status !== 'mastered') mastered.push(upd.expression);
+    }
+    const promoted = mastered.length ? await promoteQueue() : 0;
+    $('#rpReport').value = '';
+    $('#rpPreview').innerHTML = `<div class="feedback ok"><b>Записано.</b> Без підказки: ${free}, з підказкою: ${hinted}.
+      ${mastered.length ? `<br>Засвоєно: ${mastered.map(esc).join(', ')}.${promoted ? ' З черги додано нові вирази.' : ''}` : ''}</div>
+      <div class="btns"><a class="btn" href="#/expr-progress">Прогрес</a><a class="btn" href="#/expr">Усі вирази</a></div>`;
+  };
 };

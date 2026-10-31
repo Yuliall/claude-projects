@@ -92,7 +92,7 @@ async function render() {
   $$('.modal-wrap').forEach(m => m.remove());
   const [path = '', ...rest] = location.hash.replace(/^#\/?/, '').split('/');
   const arg = decodeURIComponent(rest.join('/'));
-  const navKey = { deck: 'decks', topic: 'grammar', 'expr-review': 'expr', 'expr-import': 'expr', 'expr-progress': 'expr' }[path] ?? path;
+  const navKey = { deck: 'decks', topic: 'grammar', 'expr-review': 'expr', 'expr-import': 'expr', 'expr-progress': 'expr', roleplay: 'expr' }[path] ?? path;
   $$('[data-nav]').forEach(a => a.classList.toggle('active', a.dataset.nav === navKey));
   try {
     await (Views[path] || Views[''])(arg);

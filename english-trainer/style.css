@@ -252,6 +252,17 @@ tr.row-bad td { background: var(--bad-soft); }
 .domain-grid { display: grid; grid-template-columns: 1fr; gap: 0 16px; }
 @media (min-width: 900px) { .domain-grid { grid-template-columns: 1fr 1fr; } }
 .domain-grid h3 { margin-top: 18px; }
+.rp-grid { display: grid; grid-template-columns: 1fr; gap: 10px; }
+@media (min-width: 700px) { .rp-grid { grid-template-columns: 1fr 1fr; } }
+.rp-set { border: 1px solid var(--border); border-radius: 8px; padding: 8px 12px; display: flex; flex-direction: column; gap: 6px; min-width: 0; }
+.rp-set legend { color: var(--muted); font-size: .9rem; padding: 0 4px; }
+.rp-option, .rp-expr-row { align-items: flex-start; }
+.rp-option > span, .rp-expr-row > span { display: flex; flex-direction: column; }
+.rp-expr-row > span { display: block; }
+.rp-option input, .rp-expr-row input { margin-top: 4px; }
+.badge.res-unprompted { background: var(--ok-soft); color: var(--ok); }
+.badge.res-hint { background: var(--warn-soft); color: var(--warn); }
+.badge.res-none { background: var(--border); }
 .stats.compact .stat { padding: 10px; }
 .stats.compact .stat b { font-size: 1.3rem; }
 .diff { margin-top: 10px; text-align: center; font-size: 1.1rem; }
