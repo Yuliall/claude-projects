@@ -1,7 +1,8 @@
-const CACHE = 'english-trainer-v2';
+const CACHE = 'english-trainer-v3';
 const FILES = [
   './', 'index.html', 'style.css', 'manifest.webmanifest', 'icon.svg',
-  'js/db.js', 'js/srs.js', 'js/util.js', 'js/study.js', 'js/views-words.js', 'js/views-grammar.js', 'js/app.js',
+  'js/db.js', 'js/srs.js', 'js/util.js', 'js/study.js', 'js/views-words.js', 'js/views-grammar.js',
+  'js/expr-core.js', 'js/views-expr.js', 'js/app.js',
 ];
 
 self.addEventListener('install', e => {

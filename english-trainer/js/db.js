@@ -1,22 +1,33 @@
 const DB = (() => {
   const NAME = 'english-trainer';
-  const VERSION = 1;
+  const VERSION = 2;
   let dbp;
 
   function open() {
     if (dbp) return dbp;
     dbp = new Promise((resolve, reject) => {
       const req = indexedDB.open(NAME, VERSION);
-      req.onupgradeneeded = () => {
+      // Кожен крок лише додає нові сховища; наявні записи не змінюються.
+      req.onupgradeneeded = e => {
         const db = req.result;
-        db.createObjectStore('decks', { keyPath: 'id' });
-        db.createObjectStore('cards', { keyPath: 'id' }).createIndex('deckId', 'deckId');
-        db.createObjectStore('topics', { keyPath: 'id' });
-        db.createObjectStore('exercises', { keyPath: 'id' }).createIndex('topicId', 'topicId');
-        db.createObjectStore('log', { keyPath: 'id', autoIncrement: true }).createIndex('ts', 'ts');
-        db.createObjectStore('meta', { keyPath: 'key' });
+        if (e.oldVersion < 1) {
+          db.createObjectStore('decks', { keyPath: 'id' });
+          db.createObjectStore('cards', { keyPath: 'id' }).createIndex('deckId', 'deckId');
+          db.createObjectStore('topics', { keyPath: 'id' });
+          db.createObjectStore('exercises', { keyPath: 'id' }).createIndex('topicId', 'topicId');
+          db.createObjectStore('log', { keyPath: 'id', autoIncrement: true }).createIndex('ts', 'ts');
+          db.createObjectStore('meta', { keyPath: 'key' });
+        }
+        if (e.oldVersion < 2) {
+          db.createObjectStore('expressions', { keyPath: 'id' }).createIndex('status', 'status');
+        }
       };
-      req.onsuccess = () => resolve(req.result);
+      req.onblocked = () => reject(new Error('Додаток відкрито в іншій вкладці зі старою версією. Закрийте інші вкладки й оновіть сторінку.'));
+      req.onsuccess = () => {
+        const db = req.result;
+        db.onversionchange = () => db.close();
+        resolve(db);
+      };
       req.onerror = () => reject(req.error);
     });
     return dbp;
