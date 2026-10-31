@@ -375,3 +375,51 @@ test('прогрес окремо для кожної сфери', () => {
   assert.deepEqual(pw.earlier, { total: 1, used: 1 });
   assert.deepEqual(pl.never.map(c => c.id), [l.id]);
 });
+
+// ---------- етап вивчення ----------
+
+test('підказка з перших літер: артиклі, заповнювачі й дужки лишаються', () => {
+  assert.equal(X.hintPattern('have an impact on something'), 'h___ an i_____ o_ something');
+  assert.equal(X.hintPattern('park something (for now)'), 'p___ something (f__ n__)');
+  assert.equal(X.hintPattern('get buy-in from someone'), 'g__ b__-i_ f___ someone');
+  assert.equal(X.hintPattern("I take it (that) …"), 'I t___ i_ (t___) …');
+});
+
+test('кроки сесії: знайомство → ситуації → написання для нових, потім повторення', () => {
+  const a = card({ status: 'active', cues_uk: ['a1', 'a2', 'a3'] });
+  const b = card({ status: 'active', cues_uk: ['b1', '', 'b3'] });
+  const r = card({ status: 'active', last_result: 'got' });
+  const steps = X.sessionSteps([a, b], [r], { rng: () => 0 });
+  const kinds = steps.map(s => s.kind);
+  assert.deepEqual(kinds, ['intro', 'intro', 'choice', 'choice', 'choice', 'choice', 'choice', 'write', 'write', 'review']);
+  const choices = steps.filter(s => s.kind === 'choice');
+  assert.deepEqual(choices.filter(s => s.id === a.id).map(s => s.cueIndex).sort(), [0, 1, 2], 'кожна ситуація по разу');
+  assert.deepEqual(choices.filter(s => s.id === b.id).map(s => s.cueIndex).sort(), [0, 2], 'порожня ситуація пропущена');
+  for (let i = 1; i < choices.length - 1; i++) {
+    assert.ok(choices[i].id !== choices[i - 1].id || choices.slice(i).every(s => s.id === choices[i].id), 'ситуації одного виразу не поспіль, коли є вибір');
+  }
+});
+
+test('кроки сесії: без варіантів для вибору крок ситуацій пропускається', () => {
+  const a = card({ status: 'active', cues_uk: ['a1', 'a2'] });
+  const steps = X.sessionSteps([a], [], { canChoose: () => false });
+  assert.deepEqual(steps.map(s => s.kind), ['intro', 'write']);
+});
+
+test('варіанти для вибору: правильний вираз, без дублів, спершу та сама сфера, не з черги', () => {
+  const target = card({ status: 'active', domain: 'work', expression: 'push back on something' });
+  const pool = [
+    target,
+    card({ status: 'active', domain: 'work', expression: 'push back on sth' }),
+    card({ status: 'active', domain: 'work', expression: 'circle back to something' }),
+    card({ status: 'active', domain: 'work', expression: 'park something (for now)' }),
+    card({ status: 'active', domain: 'life', expression: 'run errands' }),
+    card({ status: 'queued', domain: 'work', expression: 'flag a concern' }),
+  ];
+  const opts = X.choiceOptions(target, pool, 4, () => 0.5);
+  assert.equal(opts.length, 4);
+  assert.ok(opts.includes('push back on something'));
+  assert.ok(!opts.includes('push back on sth') && !opts.includes('flag a concern'));
+  assert.ok(opts.includes('circle back to something') && opts.includes('park something (for now)'));
+  assert.deepEqual(X.choiceOptions(target, [target], 4), ['push back on something']);
+});
