@@ -6,31 +6,59 @@ const EXPR_GRADES = [
 const SpeechRec = window.SpeechRecognition || window.webkitSpeechRecognition;
 const MIC_ICON = '<svg viewBox="0 0 24 24" width="20" height="20" aria-hidden="true"><path fill="currentColor" d="M12 14a3 3 0 0 0 3-3V5a3 3 0 0 0-6 0v6a3 3 0 0 0 3 3zm5-3a5 5 0 0 1-10 0H5a7 7 0 0 0 6 6.92V21h2v-3.08A7 7 0 0 0 19 11h-2z"/></svg>';
 
+const DOMAINS = { work: 'робота', life: 'життя' };
+const domainBadge = d => `<span class="badge dom-${d === 'life' ? 'life' : 'work'}">${DOMAINS[d] || DOMAINS.work}</span>`;
+
+// Вирази завжди читаються через upgrade, тож записи зі старих версій і старих копій мають нові поля.
+const loadExpressions = async () => (await DB.all('expressions')).map(ExprCore.upgrade);
+
+async function upgradeStoredExpressions() {
+  const all = await DB.all('expressions');
+  const changed = all.map(ExprCore.upgrade).filter((c, i) => c !== all[i]);
+  if (changed.length) await DB.putMany('expressions', changed);
+  return changed.length;
+}
+
 async function exprLimits() {
   const s = await getSettings();
-  return { reviewsPerDay: s.exprReviewsPerDay, newPerDay: s.exprNewPerDay, activeMax: s.exprActiveMax };
+  return {
+    reviewsPerDay: s.exprReviewsPerDay, newPerDay: s.exprNewPerDay, activeMax: s.exprActiveMax,
+    lifeShare: Math.min(100, Math.max(0, s.exprLifeShare)) / 100,
+  };
 }
 
 async function promoteQueue() {
-  const [all, lim] = await Promise.all([DB.all('expressions'), exprLimits()]);
-  const promoted = ExprCore.promote(all, lim.activeMax, ExprCore.dayKey());
+  const [all, lim] = await Promise.all([loadExpressions(), exprLimits()]);
+  const promoted = ExprCore.promote(all, lim.activeMax, ExprCore.dayKey(), lim.lifeShare);
   if (promoted.length) await DB.putMany('expressions', promoted);
   return promoted.length;
 }
 
 async function exprPlan() {
   await promoteQueue();
-  const [all, lim, logs] = await Promise.all([DB.all('expressions'), exprLimits(), DB.since('log', 'ts', startOfDay())]);
+  const [all, lim, logs] = await Promise.all([loadExpressions(), exprLimits(), DB.since('log', 'ts', startOfDay())]);
   const today = ExprCore.dayKey();
   return { all, lim, today, ...ExprCore.planDay(all, today, ExprCore.countDone(logs, today), lim) };
 }
 
-async function copyRolePlay() {
-  const [all, logs] = await Promise.all([DB.all('expressions'), DB.since('log', 'ts', startOfDay())]);
-  const list = ExprCore.rolePlayPick(logs, Object.fromEntries(all.map(c => [c.id, c])), ExprCore.dayKey());
-  if (!list.length) { toast('Сьогодні ще не було повторення виразів'); return; }
+async function copyDialog(domain) {
+  const [all, logs] = await Promise.all([loadExpressions(), DB.since('log', 'ts', startOfDay())]);
+  const list = ExprCore.rolePlayPick(logs, Object.fromEntries(all.map(c => [c.id, c])), ExprCore.dayKey(), 5, domain);
+  if (!list.length) { toast(`Немає активних виразів у сфері «${DOMAINS[domain]}»`); return; }
   await copyText(list.join(', '));
-  toast('Скопійовано: ' + list.join(', '));
+  toast(`Скопійовано (${DOMAINS[domain]}): ${list.join(', ')}`);
+}
+
+// Сцена буде або робочою, або побутовою, тому спершу вибір сфери.
+function chooseDialog() {
+  const m = modal(`<h3>Скопіювати для діалогу</h3>
+    <p class="muted">Яка буде сцена? Скопіюється до 5 виразів цієї сфери: спершу ті, що сьогодні були «Забула» і «Частково».</p>
+    <div class="btns">
+      <button class="btn primary" data-dom="work">Робота</button>
+      <button class="btn primary" data-dom="life">Життя</button>
+      <button class="btn ghost" data-m="close">Скасувати</button>
+    </div>`);
+  $$('[data-dom]', m.el).forEach(b => { b.onclick = async () => { m.close(); await copyDialog(b.dataset.dom); }; });
 }
 
 const fmtDay = key => key ? key.split('-').reverse().slice(0, 2).join('.') : '';
@@ -45,7 +73,8 @@ function exprDueText(c, today) {
 function exprRow(c, today) {
   return `<div class="expr-row" data-row="${c.id}">
     <div class="expr-main">
-      <b>${esc(c.expression)}</b> <span class="muted">${esc(c.meaning_uk)}</span>
+      ${domainBadge(c.domain)} <b>${esc(c.expression)}</b> <span class="muted">${esc(c.meaning_uk)}</span>
+      ${c.image_note ? '' : '<span class="muted small" title="Образу ще немає">· без образу</span>'}
       <div class="ex">без підказки: ${c.used_unprompted_count || 0} · з підказкою: ${c.used_with_hint_count || 0} · ${exprDueText(c, today)}</div>
     </div>
     <div class="btns expr-use">
@@ -68,7 +97,7 @@ Views.expr = async () => {
 
   app().innerHTML = `
     <div class="page-head">
-      <div><h1>Вирази</h1><p class="muted">Активних ${active.length} з ${lim.activeMax}${queued.length ? ` · у черзі ${queued.length}` : ''} · засвоєно ${mastered.length}</p></div>
+      <div><h1>Вирази</h1><p class="muted">Активних ${active.length} з ${lim.activeMax} (робота ${active.filter(c => c.domain !== 'life').length}, життя ${active.filter(c => c.domain === 'life').length})${queued.length ? ` · у черзі ${queued.length}` : ''} · засвоєно ${mastered.length}</p></div>
       <div class="btns">
         <a class="btn primary" href="#/expr-review" ${n ? '' : 'aria-disabled="true"'}>Повторити: ${n}</a>
         <a class="btn" href="#/expr-import">Імпорт</a>
@@ -109,12 +138,23 @@ Views.expr = async () => {
   actions.editExpr = el => exprModal(byId[el.dataset.id]);
 };
 
+const MAX_CUES = 3;
+
 function exprModal(c) {
   const m = modal(`<h3>Вираз</h3>
     <form id="xef" class="stack">
       <label>Вираз (expression)<input name="expression" value="${esc(c.expression)}" required></label>
       <label>Значення (meaning_uk)<input name="meaning_uk" value="${esc(c.meaning_uk)}" required></label>
-      <label>Ситуація-підказка (cue_uk)<textarea name="cue_uk" rows="2">${esc(c.cue_uk)}</textarea></label>
+      <label>Сфера<select name="domain">
+        <option value="work" ${c.domain !== 'life' ? 'selected' : ''}>робота</option>
+        <option value="life" ${c.domain === 'life' ? 'selected' : ''}>життя</option>
+      </select></label>
+      <div class="cues-edit">
+        <span class="field-label">Ситуації українською (до ${MAX_CUES}), щоразу показується інша</span>
+        <div id="cueRows"></div>
+        <button type="button" class="btn small" id="cueAdd">+ Додати ситуацію</button>
+      </div>
+      <label>Образ або асоціація<textarea name="image_note" rows="2" placeholder="Напр.: push back on — відштовхнути документ назад через стіл">${esc(c.image_note)}</textarea></label>
       <label>Приклад (example_en)<textarea name="example_en" rows="2">${esc(c.example_en)}</textarea></label>
       <label>Цитата з уроку<input name="note" value="${esc(c.note)}"></label>
       <label>Джерело<input name="source" value="${esc(c.source)}"></label>
@@ -129,12 +169,31 @@ function exprModal(c) {
         <button type="button" class="btn ghost" data-m="close">Скасувати</button>
       </div>
     </form>`);
+  const cueValues = () => $$('[name=cue]', m.el).map(i => i.value);
+  const drawCues = values => {
+    $('#cueRows', m.el).innerHTML = values.map((v, i) => `<div class="cue-row">
+        <textarea name="cue" rows="2" placeholder="Ситуація ${i + 1}">${esc(v)}</textarea>
+        <button type="button" class="btn small ghost danger" data-del-cue="${i}" aria-label="Видалити ситуацію ${i + 1}">Видалити</button>
+      </div>`).join('') || '<p class="muted small">Ситуацій немає: на картці буде лише значення.</p>';
+    $('#cueAdd', m.el).hidden = values.length >= MAX_CUES;
+    $$('[data-del-cue]', m.el).forEach(b => {
+      b.onclick = () => { const v = cueValues(); v.splice(+b.dataset.delCue, 1); drawCues(v); };
+    });
+  };
+  drawCues(c.cues_uk.length ? c.cues_uk : ['']);
+  $('#cueAdd', m.el).onclick = () => { drawCues([...cueValues(), '']); $$('[name=cue]', m.el).pop().focus(); };
+
   $('#xef', m.el).onsubmit = async e => {
     e.preventDefault();
     const f = Object.fromEntries(new FormData(e.target));
+    const cues = cueValues().map(s => s.trim()).filter(Boolean).slice(0, MAX_CUES);
     const upd = ExprCore.checkMastered({
       ...c,
-      expression: f.expression.trim(), meaning_uk: f.meaning_uk.trim(), cue_uk: f.cue_uk.trim(),
+      expression: f.expression.trim(), meaning_uk: f.meaning_uk.trim(),
+      domain: f.domain === 'life' ? 'life' : 'work',
+      cues_uk: cues, cue_uk: cues[0] || '',
+      last_cue_index: c.last_cue_index != null && c.last_cue_index < cues.length ? c.last_cue_index : null,
+      image_note: f.image_note.trim(),
       example_en: f.example_en.trim(), note: f.note.trim(), source: f.source.trim(),
       used_unprompted_count: Math.max(0, +f.used_unprompted_count || 0),
       used_with_hint_count: Math.max(0, +f.used_with_hint_count || 0),
@@ -188,23 +247,35 @@ function runExprSession(tasks) {
       <div id="ex"></div></div>`;
     actions.quit = finish;
     let graded = false;
-    exprCard(t, $('#ex'), async grade => {
+    exprCard(t, $('#ex'), async (grade, cueIndex) => {
       if (graded) return;
       graded = true;
       if (!t.practice) {
         const wasNew = ExprCore.isNew(t.c);
-        const upd = ExprCore.schedule(t.c, grade, ExprCore.dayKey());
+        const upd = ExprCore.schedule(t.c, grade, ExprCore.dayKey(), cueIndex);
         await DB.put('expressions', upd);
         await DB.put('log', { ts: Date.now(), type: 'expr', itemId: upd.id, grade, first: wasNew });
         results.set(upd.id, { c: upd, grade });
         t.c = upd;
+      } else {
+        t.c = { ...t.c, last_cue_index: cueIndex };
       }
-      // «Забула» ще раз у кінці сесії лише для практики; на розклад це не впливає.
-      if (grade === 'forgot' && !t.practice) queue.push({ c: t.c, practice: true });
-      else done++;
-      step();
+      const next = () => {
+        // «Забула» ще раз у кінці сесії лише для практики; на розклад це не впливає.
+        if (grade === 'forgot' && !t.practice) queue.push({ c: t.c, practice: true });
+        else done++;
+        step();
+      };
+      if (grade !== 'got' && !t.c.image_note && !askedImage.has(t.c.id)) {
+        askedImage.add(t.c.id);
+        imagePrompt(t.c, $('#ex'), saved => {
+          t.c = saved;
+          if (results.has(saved.id)) results.get(saved.id).c = saved;
+        }, next);
+      } else next();
     });
   };
+  const askedImage = new Set();
 
   const finish = () => {
     document.onkeydown = null;
@@ -217,11 +288,11 @@ function runExprSession(tasks) {
       <p>Згадала: <b>${count('got')}</b> · частково: <b>${count('partly')}</b> · забула: <b>${count('forgot')}</b></p>
       ${weak.length ? `<h3>Варто вжити в розмові</h3><ul class="wrong-list">${weak.map(r => `<li><b>${esc(r.c.expression)}</b> — ${esc(r.c.meaning_uk)}</li>`).join('')}</ul>` : ''}
       <div class="btns center">
-        <button class="btn primary" data-act="rolePlay">Скопіювати для рольової гри · Copy for role-play</button>
+        <button class="btn primary" data-act="dialog">Скопіювати для діалогу</button>
         <a class="btn" href="#/expr">Усі вирази</a>
         <a class="btn" href="#/">На головну</a>
       </div></div>`;
-    actions.rolePlay = copyRolePlay;
+    actions.dialog = chooseDialog;
   };
 
   step();
@@ -238,11 +309,37 @@ function tokensHtml(tokens) {
   }).join(' ');
 }
 
+// Після «Забула» чи «Частково», якщо образу немає. Заповнювати не обов'язково.
+function imagePrompt(c, el, onSaved, done) {
+  document.onkeydown = null;
+  const box = document.createElement('div');
+  box.className = 'panel stack image-prompt';
+  box.innerHTML = `<label for="imgIn" class="field-label">Придумай свій образ <span class="muted small">(не обов'язково)</span></label>
+    <textarea id="imgIn" rows="2" placeholder="Напр.: push back on — відштовхнути документ назад через стіл"></textarea>
+    <div class="btns">
+      <button type="button" class="btn primary" id="imgSave">Зберегти</button>
+      <button type="button" class="btn" id="imgSkip">Далі без образу</button>
+    </div>`;
+  $('.rate', el).replaceWith(box);
+  $('#imgIn').focus();
+  $('#imgSkip').onclick = done;
+  $('#imgSave').onclick = async () => {
+    const text = $('#imgIn').value.trim();
+    if (!text) { $('#imgIn').focus(); return; }
+    const saved = { ...ExprCore.upgrade(await DB.get('expressions', c.id)), image_note: text };
+    await DB.put('expressions', saved);
+    onSaved(saved);
+    toast('Образ збережено');
+    done();
+  };
+}
+
 function exprCard(t, el, onGrade) {
   const c = t.c;
+  const cue = ExprCore.pickCue(c);
   el.innerHTML = `<div class="ex-card">
-      <div class="ex-label">${t.practice ? 'Ще раз · Once more' : 'Згадайте вираз англійською · Recall the expression'}</div>
-      ${c.cue_uk ? `<div class="ex-sentence">${esc(c.cue_uk)}</div>` : ''}
+      <div class="ex-label">${domainBadge(c.domain)} ${t.practice ? 'Ще раз · Once more' : 'Згадайте вираз англійською · Recall the expression'}</div>
+      ${cue.text ? `<div class="ex-sentence">${esc(cue.text)}</div>` : ''}
       <div class="ex-meaning">${esc(c.meaning_uk)}</div>
       <div class="say-first">Спершу скажіть вголос · Say it aloud first</div>
     </div>
@@ -282,6 +379,7 @@ function exprCard(t, el, onGrade) {
     const verdict = { got: 'Збігається', partly: 'Збігається частково', forgot: 'Не збігається' }[r.suggestion];
     $('#after').innerHTML = `<div class="ex-card reveal">
         <div class="ex-word">${esc(c.expression)} ${sayBtn(c.expression)}</div>
+        ${c.image_note ? `<div class="ex-image"><span class="muted small">Образ</span>${esc(c.image_note)}</div>` : ''}
         ${c.example_en ? `<div class="ex-example">${esc(c.example_en)}</div>` : ''}
         ${c.note ? `<div class="ex-note">З уроку: «${esc(c.note)}»</div>` : ''}
         <div class="diff">
@@ -293,10 +391,10 @@ function exprCard(t, el, onGrade) {
       <div class="rate rate3">${EXPR_GRADES.map(([g, label, cls], i) =>
         `<button class="btn ${cls}${g === r.suggestion ? ' suggested' : ''}" data-g="${g}">${label} <kbd>${i + 1}</kbd></button>`).join('')}</div>`;
     bindSay($('#after'));
-    $$('[data-g]', el).forEach(b => { b.onclick = () => onGrade(b.dataset.g); });
+    $$('[data-g]', el).forEach(b => { b.onclick = () => onGrade(b.dataset.g, cue.index); });
     $(`[data-g="${r.suggestion}"]`, el).focus();
     document.onkeydown = ev => {
-      if (['1', '2', '3'].includes(ev.key)) onGrade(EXPR_GRADES[+ev.key - 1][0]);
+      if (['1', '2', '3'].includes(ev.key)) onGrade(EXPR_GRADES[+ev.key - 1][0], cue.index);
     };
   };
 }
@@ -304,12 +402,14 @@ function exprCard(t, el, onGrade) {
 // ---------- імпорт ----------
 
 Views['expr-import'] = async () => {
-  const all = await DB.all('expressions');
+  const all = await loadExpressions();
   app().innerHTML = `
     <div class="page-head"><div><a href="#/expr" class="crumb">Вирази</a><h1>Імпорт виразів</h1></div></div>
     <div class="panel stack">
-      <p class="muted">Один вираз на рядок: <code>expression | meaning_uk | cue_uk | example_en | quote</code>. Поле quote не обов'язкове і зберігається як цитата з уроку. Рядок заголовків і таблиця markdown теж підходять.</p>
-      <textarea id="imp" rows="9" placeholder="push back on something | заперечувати, не погоджуватися | Клієнт вимагає нереальний термін, і ти не погоджуєшся. | I had to push back on the deadline. | we need to push back"></textarea>
+      <p class="muted">Один вираз на рядок:<br>
+        <code>вираз | значення | сфера (робота/життя) | ситуація 1 | ситуація 2 | ситуація 3 | образ | приклад англійською | цитата з уроку</code><br>
+        Ситуації 2 і 3, образ і цитата не обов'язкові, але їхні місця між знаками | треба лишити. Старий формат <code>вираз | значення | ситуація | приклад | цитата</code> теж підходить, сфера тоді «робота».</p>
+      <textarea id="imp" rows="9" placeholder="push back on something | заперечити, не погодитися | робота | Розробники вважають дедлайн нереальним | Керівник додає функцію в повний спринт | | відштовхнути документ назад через стіл | The team pushed back on the deadline."></textarea>
       <label>Джерело: дата уроку або test<input id="src" value="${ExprCore.dayKey()}"></label>
       <div class="btns"><button class="btn primary" data-act="preview">Перевірити</button></div>
     </div>
@@ -326,15 +426,17 @@ Views['expr-import'] = async () => {
       <h3>Попередній перегляд</h3>
       <p>Буде додано: <b>${ok.length}</b>${dup ? ` · пропущено дублів: ${dup}` : ''}${bad ? ` · рядків з помилками: <b class="warn">${bad}</b> (їх не буде збережено)` : ''}</p>
       <div class="table-wrap"><table class="cards">
-        <thead><tr><th>#</th><th>Вираз</th><th>Значення і ситуація</th><th>Приклад</th><th>Стан</th></tr></thead>
+        <thead><tr><th>#</th><th>Вираз</th><th>Значення і ситуації</th><th>Образ</th><th>Приклад</th><th>Стан</th></tr></thead>
         <tbody>${rows.map(r => `<tr class="${r.errors.length ? 'row-bad' : r.duplicate ? 'dup' : ''}">
           <td class="muted">${r.line}</td>
-          <td><b>${esc(r.data.expression)}</b></td>
-          <td>${esc(r.data.meaning_uk)}<div class="ex">${esc(r.data.cue_uk)}</div></td>
+          <td>${domainBadge(r.data.domain)}<div><b>${esc(r.data.expression)}</b></div></td>
+          <td>${esc(r.data.meaning_uk)}${r.data.cues_uk.map((cue, i) => `<div class="ex">${i + 1}. ${esc(cue)}</div>`).join('')}</td>
+          <td class="small">${esc(r.data.image_note) || '<span class="muted">—</span>'}</td>
           <td>${esc(r.data.example_en)}${r.data.note ? `<div class="ex">«${esc(r.data.note)}»</div>` : ''}</td>
           <td>${r.errors.length ? `<span class="warn">${r.errors.map(esc).join('<br>')}</span>` : r.duplicate ? '<span class="muted">дубль, пропущено</span>' : 'гаразд'}
+            ${r.format === 'old' && !r.errors.length ? '<div class="muted small">старий формат</div>' : ''}
             ${r.warnings.length ? `<div class="warn small">${r.warnings.map(esc).join('<br>')}</div>` : ''}</td>
-        </tr>`).join('') || '<tr><td colspan="5" class="muted">Немає рядків</td></tr>'}</tbody>
+        </tr>`).join('') || '<tr><td colspan="6" class="muted">Немає рядків</td></tr>'}</tbody>
       </table></div>
       <div class="btns"><button class="btn primary" data-act="save" ${ok.length ? '' : 'disabled'}>Зберегти ${ok.length}</button></div>`;
   };
@@ -346,7 +448,7 @@ Views['expr-import'] = async () => {
     await DB.putMany('expressions', fresh);
     await promoteQueue();
     const ids = new Set(fresh.map(c => c.id));
-    const nowActive = (await DB.all('expressions')).filter(c => ids.has(c.id) && c.status === 'active').length;
+    const nowActive = (await loadExpressions()).filter(c => ids.has(c.id) && c.status === 'active').length;
     toast(`Додано ${fresh.length}: активних ${nowActive}, у черзі ${fresh.length - nowActive}`);
     location.hash = '#/expr';
   };
@@ -355,28 +457,33 @@ Views['expr-import'] = async () => {
 // ---------- прогрес ----------
 
 Views['expr-progress'] = async () => {
-  const [all, logs] = await Promise.all([DB.all('expressions'), DB.all('log')]);
+  const [all, logs] = await Promise.all([loadExpressions(), DB.all('log')]);
   const today = ExprCore.dayKey();
-  const p = ExprCore.weeklyProgress(all, logs, today, 8);
-  const max = Math.max(1, ...p.weeks.map(w => w.unprompted));
-  const share = p.earlier.total ? Math.round(p.earlier.used / p.earlier.total * 100) : null;
-  app().innerHTML = `
-    <div class="page-head"><div><a href="#/expr" class="crumb">Вирази</a><h1>Прогрес</h1></div></div>
-    <div class="stats">
-      <div class="stat"><b>${p.weeks[p.weeks.length - 1].unprompted}</b><span>виразів без підказки цього тижня</span></div>
-      <div class="stat"><b>${share === null ? '—' : share + '%'}</b><span>виразів з попередніх тижнів вжито без підказки${p.earlier.total ? ` (${p.earlier.used} з ${p.earlier.total})` : ''}</span></div>
-      <div class="stat"><b>${all.filter(c => c.status === 'mastered').length}</b><span>засвоєно</span></div>
-    </div>
-    <div class="panel">
-      <h3>Вирази, вжиті без підказки, по тижнях</h3>
+  const total = ExprCore.weeklyProgress(all, logs, today, 8);
+  const domainPanel = d => {
+    const p = ExprCore.weeklyProgress(all, logs, today, 8, d);
+    const cards = all.filter(c => (c.domain === 'life') === (d === 'life'));
+    const max = Math.max(1, ...p.weeks.map(w => w.unprompted));
+    const share = p.earlier.total ? Math.round(p.earlier.used / p.earlier.total * 100) : null;
+    return `<section class="panel" data-domain="${d}">
+      <h2>${domainBadge(d)} ${d === 'life' ? 'Життя' : 'Робота'}</h2>
+      <div class="stats compact">
+        <div class="stat"><b>${p.weeks[p.weeks.length - 1].unprompted}</b><span>без підказки цього тижня</span></div>
+        <div class="stat"><b>${share === null ? '—' : share + '%'}</b><span>з попередніх тижнів вжито${p.earlier.total ? ` (${p.earlier.used} з ${p.earlier.total})` : ''}</span></div>
+        <div class="stat"><b>${cards.filter(c => c.status === 'active').length} / ${cards.filter(c => c.status === 'mastered').length}</b><span>активних / засвоєно</span></div>
+      </div>
+      <h3>Вжиті без підказки, по тижнях</h3>
       <div class="week-bars">${p.weeks.map(w => `<div class="week">
         <span class="week-label">${fmtDay(w.start)}–${fmtDay(w.end)}</span>
         <span class="week-bar"><span style="width:${w.unprompted / max * 100}%"></span></span>
         <span class="week-num">${w.unprompted}${w.hint ? ` <span class="muted small">(+${w.hint} з підказкою)</span>` : ''}</span>
       </div>`).join('')}</div>
-    </div>
-    <div class="panel">
       <h3>Ще не вжиті в мовленні (${p.never.length})</h3>
-      ${p.never.length ? `<ul class="plain-list">${p.never.map(c => `<li><b>${esc(c.expression)}</b> <span class="muted">${esc(c.meaning_uk)}</span></li>`).join('')}</ul>` : '<p class="muted">Усі вирази вже звучали в розмові.</p>'}
-    </div>`;
+      ${p.never.length ? `<ul class="plain-list">${p.never.map(c => `<li><b>${esc(c.expression)}</b> <span class="muted">${esc(c.meaning_uk)}</span></li>`).join('')}</ul>` : '<p class="muted">Усі вирази цієї сфери вже звучали в розмові.</p>'}
+    </section>`;
+  };
+  app().innerHTML = `
+    <div class="page-head"><div><a href="#/expr" class="crumb">Вирази</a><h1>Прогрес</h1></div></div>
+    <p class="muted">Разом цього тижня вжито без підказки: ${total.weeks[total.weeks.length - 1].unprompted}; засвоєно: ${all.filter(c => c.status === 'mastered').length}.</p>
+    <div class="domain-grid">${domainPanel('work')}${domainPanel('life')}</div>`;
 };

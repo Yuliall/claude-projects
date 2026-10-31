@@ -20,8 +20,9 @@ Views.settings = async () => {
       <h3>Вирази</h3>
       <label>Повторень виразів на день<input type="number" name="exprReviewsPerDay" min="0" max="200" value="${s.exprReviewsPerDay}"></label>
       <label>Нових виразів на день<input type="number" name="exprNewPerDay" min="0" max="100" value="${s.exprNewPerDay}"></label>
-      <label>Активних виразів одночасно<input type="number" name="exprActiveMax" min="1" max="200" value="${s.exprActiveMax}"></label>
-      <p class="muted">Повторення понад денний ліміт переходять на наступний день. Нові вирази понад кількість активних чекають у черзі.</p>
+      <label>Активних виразів одночасно (спільно для обох сфер)<input type="number" name="exprActiveMax" min="1" max="200" value="${s.exprActiveMax}"></label>
+      <label>Частка карток «життя» в сесії, %<input type="number" name="exprLifeShare" min="0" max="100" value="${s.exprLifeShare}"></label>
+      <p class="muted">Повторення понад денний ліміт переходять на наступний день. Нові вирази понад кількість активних чекають у черзі. Частка «життя» діє, коли карток більше за ліміт: тоді жодна сфера не витісняє іншу; якщо в одній сфері карток мало, їхні місця дістаються іншій.</p>
       <div class="btns"><button class="btn primary">Зберегти</button></div>
     </form>
     <div class="panel stack">
@@ -45,6 +46,7 @@ Views.settings = async () => {
     await saveSettings({
       ...s, newPerDay: +f.newPerDay, newGrammarPerDay: +f.newGrammarPerDay, reviewLimit: +f.reviewLimit, retention: +f.retention,
       exprReviewsPerDay: Math.max(0, +f.exprReviewsPerDay), exprNewPerDay: Math.max(0, +f.exprNewPerDay), exprActiveMax: Math.max(1, +f.exprActiveMax),
+      exprLifeShare: Math.min(100, Math.max(0, +f.exprLifeShare)),
     });
     await promoteQueue();
     toast('Збережено');
@@ -70,6 +72,7 @@ Views.settings = async () => {
       await DB.putMany(n, n === 'log' && !replace ? data[n].map(({ id, ...rest }) => rest) : data[n]);
     }
     if (data.settings) await saveSettings({ ...s, ...data.settings });
+    await upgradeStoredExpressions();
     toast('Дані відновлено');
     render();
   };
@@ -122,7 +125,7 @@ async function upgradeLearningStates() {
   await metaSet('learningStates', 1);
 }
 
-DB.open().then(upgradeLearningStates).then(() => {
+DB.open().then(upgradeLearningStates).then(upgradeStoredExpressions).then(() => {
   navigator.storage?.persist?.().catch(() => {});
   render();
 }).catch(err => {

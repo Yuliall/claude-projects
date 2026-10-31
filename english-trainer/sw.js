@@ -1,4 +1,4 @@
-const CACHE = 'english-trainer-v4';
+const CACHE = 'english-trainer-v5';
 const FILES = [
   './', 'index.html', 'style.css', 'manifest.webmanifest', 'icon.svg',
   'js/db.js', 'js/srs.js', 'js/util.js', 'js/study.js', 'js/views-words.js', 'js/views-grammar.js',
