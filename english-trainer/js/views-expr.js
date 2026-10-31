@@ -228,9 +228,9 @@ Views['expr-review'] = async () => {
 };
 
 const STAGE_LABEL = {
-  intro: 'Крок 1 з 3 · знайомство',
-  choice: 'Крок 2 з 3 · у ситуаціях',
-  write: 'Крок 3 з 3 · пишемо з підказкою',
+  intro: 'Новий вираз · крок 1 з 3: знайомство',
+  choice: 'Новий вираз · крок 2 з 3: у ситуації',
+  write: 'Новий вираз · крок 3 з 3: пишемо з підказкою',
   review: 'Повторення',
 };
 
@@ -242,7 +242,8 @@ function runExprSession(plan) {
   const queue = ExprCore.sessionSteps(plan.fresh, plan.reviews, {
     canChoose: c => ExprCore.choiceOptions(c, pool).length >= 2,
   }).map(s => ({ ...s, practice: false }));
-  const total = queue.length;
+  // Лічильник рахує вирази, а не кроки: вираз пройдено після написання чи повторення.
+  const total = plan.fresh.length + plan.reviews.length;
   const results = new Map();
   const askedImage = new Set();
   let done = 0;
@@ -257,20 +258,21 @@ function runExprSession(plan) {
       <div class="session-head">
         <button class="btn ghost small" data-act="quit">Завершити</button>
         <div class="bar"><div style="width:${Math.round(done / total * 100)}%"></div></div>
-        <span class="muted">${done} / ${total}</span>
+        <span class="muted">${done} з ${total} ${total === 1 ? 'виразу' : 'виразів'}</span>
       </div>
       <div class="stage-label">${STAGE_LABEL[t.kind]}</div>
       <div id="ex"></div></div>`;
     actions.quit = finish;
 
     if (t.kind === 'intro') {
-      introCard(c, $('#ex'), () => { done++; step(); });
+      introCard(c, $('#ex'), step);
       return;
     }
     if (t.kind === 'choice') {
       choiceCard(c, t.cueIndex, pool, $('#ex'), correct => {
-        if (correct) done++;
-        else {
+        // На кроці написання покажеться інша ситуація, ніж тут.
+        byId[c.id] = { ...byId[c.id], last_cue_index: t.cueIndex };
+        if (!correct) {
           // Помилкова ситуація повертається ще раз, до кроку написання.
           const at = queue.findIndex(s => s.kind === 'write' || s.kind === 'review');
           queue.splice(at < 0 ? queue.length : at, 0, t);
