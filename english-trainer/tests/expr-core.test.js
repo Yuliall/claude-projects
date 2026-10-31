@@ -385,19 +385,24 @@ test('підказка з перших літер: артиклі, заповн�
   assert.equal(X.hintPattern("I take it (that) …"), 'I t___ i_ (t___) …');
 });
 
-test('кроки сесії: знайомство → ситуації → написання для нових, потім повторення', () => {
-  const a = card({ status: 'active', cues_uk: ['a1', 'a2', 'a3'] });
-  const b = card({ status: 'active', cues_uk: ['b1', '', 'b3'] });
+test('кроки сесії: групи по 3 — знайомство, одна ситуація на вираз, написання; потім повторення', () => {
+  const fresh = Array.from({ length: 7 }, (_, i) => card({ status: 'active', expression: 'e' + i, cues_uk: ['a', '', 'c'] }));
   const r = card({ status: 'active', last_result: 'got' });
-  const steps = X.sessionSteps([a, b], [r], { rng: () => 0 });
-  const kinds = steps.map(s => s.kind);
-  assert.deepEqual(kinds, ['intro', 'intro', 'choice', 'choice', 'choice', 'choice', 'choice', 'write', 'write', 'review']);
+  const steps = X.sessionSteps(fresh, [r], { rng: () => 0.99 });
+  const short = steps.map(s => s.kind[0]).join('');
+  assert.equal(short, 'iiicccwww' + 'iiicccwww' + 'icw' + 'r');
+  assert.equal(steps.length, 7 * 3 + 1, '3 кроки на новий вираз замість 5');
   const choices = steps.filter(s => s.kind === 'choice');
-  assert.deepEqual(choices.filter(s => s.id === a.id).map(s => s.cueIndex).sort(), [0, 1, 2], 'кожна ситуація по разу');
-  assert.deepEqual(choices.filter(s => s.id === b.id).map(s => s.cueIndex).sort(), [0, 2], 'порожня ситуація пропущена');
-  for (let i = 1; i < choices.length - 1; i++) {
-    assert.ok(choices[i].id !== choices[i - 1].id || choices.slice(i).every(s => s.id === choices[i].id), 'ситуації одного виразу не поспіль, коли є вибір');
-  }
+  assert.ok(choices.every(s => s.cueIndex === 2), 'береться непорожня ситуація');
+  const g1 = steps.slice(0, 9);
+  assert.deepEqual(g1.filter(s => s.kind === 'intro').map(s => s.id), fresh.slice(0, 3).map(c => c.id));
+  assert.notDeepEqual(g1.filter(s => s.kind === 'choice').map(s => s.id), fresh.slice(0, 3).map(c => c.id), 'порядок вибору відрізняється від знайомства');
+  assert.deepEqual(new Set(g1.filter(s => s.kind === 'choice').map(s => s.id)), new Set(fresh.slice(0, 3).map(c => c.id)));
+});
+
+test('кроки сесії: розмір групи налаштовується', () => {
+  const fresh = Array.from({ length: 4 }, () => card({ status: 'active', cues_uk: ['a'] }));
+  assert.equal(X.sessionSteps(fresh, [], { groupSize: 2 }).map(s => s.kind[0]).join(''), 'iiccww' + 'iiccww');
 });
 
 test('кроки сесії: без варіантів для вибору крок ситуацій пропускається', () => {

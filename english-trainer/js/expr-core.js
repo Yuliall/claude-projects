@@ -228,28 +228,24 @@ const ExprCore = (() => {
       ARTICLES.has(w.toLowerCase()) || PLACEHOLDERS.has(w.toLowerCase()) ? w : w[0] + '_'.repeat(w.length - 1));
   }
 
-  // Кроки сесії: для нових виразів знайомство → вибір виразу до кожної ситуації → написання з підказкою;
-  // далі повторення вже знайомих. canChoose(card) каже, чи є з чого складати варіанти.
-  function sessionSteps(fresh, reviews, { rng = Math.random, canChoose = () => true } = {}) {
-    const steps = fresh.map(c => ({ kind: 'intro', id: c.id }));
-    const choices = [];
-    for (const c of fresh) {
-      if (!canChoose(c)) continue;
-      (c.cues_uk || []).forEach((cue, cueIndex) => { if (cue) choices.push({ kind: 'choice', id: c.id, cueIndex }); });
+  // Кроки сесії. Нові вирази вчаться групами по groupSize: знайомство з усією групою →
+  // вибір виразу до однієї ситуації кожного (у зміненому порядку) → написання з підказкою.
+  // Решта ситуацій з'являється на наступних повтореннях. Далі повторення вже знайомих.
+  // canChoose(card) каже, чи є з чого складати варіанти.
+  function sessionSteps(fresh, reviews, { rng = Math.random, canChoose = () => true, groupSize = 3 } = {}) {
+    const steps = [];
+    for (let g = 0; g < fresh.length; g += groupSize) {
+      const group = fresh.slice(g, g + groupSize);
+      steps.push(...group.map(c => ({ kind: 'intro', id: c.id })));
+      const choices = group.filter(canChoose).map(c => {
+        const cues = (c.cues_uk || []).map((q, i) => (q ? i : -1)).filter(i => i >= 0);
+        return cues.length ? { kind: 'choice', id: c.id, cueIndex: cues[Math.min(cues.length - 1, Math.floor(rng() * cues.length))] } : null;
+      }).filter(Boolean);
+      // Інший порядок, ніж при знайомстві, щоб вибір не вгадувався за порядком.
+      if (choices.length > 1) choices.push(choices.shift());
+      steps.push(...choices);
+      steps.push(...group.map(c => ({ kind: 'write', id: c.id })));
     }
-    // Перемішуємо, але так, щоб дві ситуації одного виразу не йшли поспіль, коли цього можна уникнути.
-    const shuffled = [];
-    const pool = [...choices];
-    while (pool.length) {
-      const prev = shuffled[shuffled.length - 1];
-      const allowed = pool.filter(s => !prev || s.id !== prev.id);
-      const from = allowed.length ? allowed : pool;
-      const pick = from[Math.min(from.length - 1, Math.floor(rng() * from.length))];
-      pool.splice(pool.indexOf(pick), 1);
-      shuffled.push(pick);
-    }
-    steps.push(...shuffled);
-    steps.push(...fresh.map(c => ({ kind: 'write', id: c.id })));
     steps.push(...reviews.map(c => ({ kind: 'review', id: c.id })));
     return steps;
   }
