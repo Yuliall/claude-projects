@@ -34,14 +34,21 @@ const ExprCore = (() => {
       if (piece === '(') { depth++; continue; }
       if (piece === ')') { depth = Math.max(0, depth - 1); continue; }
       for (const t of tokenize(piece)) {
-        const kind = ARTICLES.has(t) ? 'art' : PLACEHOLDERS.has(t) ? 'ph' : depth ? 'opt' : 'req';
+        // «to» на початку інфінітива («to internalize») можна не писати у відповіді.
+        const kind = !items.length && !depth && t === 'to' ? 'to'
+          : ARTICLES.has(t) ? 'art' : PLACEHOLDERS.has(t) ? 'ph' : depth ? 'opt' : 'req';
         items.push({ text: t, kind });
       }
     }
     return items;
   }
 
-  const expressionKey = expression => analyse(expression).filter(i => i.kind === 'req').map(i => i.text).join(' ');
+  // Ключ для пошуку дублів. Початкове «to» лишається, щоб «to deliberate» (дієслово) не збігалося з «deliberate».
+  const expressionKey = expression => {
+    const items = analyse(expression);
+    const req = items.filter(i => i.kind === 'req').map(i => i.text).join(' ');
+    return req && items[0]?.kind === 'to' ? 'to ' + req : req;
+  };
 
   // Найдовша спільна підпослідовність: повертає множини індексів збігів у a та b.
   function lcs(a, b) {
@@ -65,7 +72,7 @@ const ExprCore = (() => {
   // Заповнювачі (something, someone) не обов'язкові: «push back on the deadline» підходить до «push back on something».
   function compare(answer, expression) {
     const items = analyse(expression);
-    const ans = tokenize(answer).map(text => ({ text, article: ARTICLES.has(text) }));
+    const ans = tokenize(answer).map((text, i) => ({ text, article: ARTICLES.has(text) || (i === 0 && text === 'to') }));
     const target = items.map((it, idx) => ({ ...it, idx })).filter(it => it.kind === 'req' || it.kind === 'opt');
     const ansWords = ans.map((t, idx) => ({ ...t, idx })).filter(t => !t.article);
     const { ia, ib } = lcs(ansWords.map(t => t.text), target.map(t => t.text));
@@ -90,7 +97,7 @@ const ExprCore = (() => {
       answer: ans.map((t, idx) => ({ text: t.text, state: t.article ? 'neutral' : matchedAns.has(idx) ? 'match' : hasPlaceholder ? 'neutral' : 'extra' })),
       expression: items.map((it, idx) => ({
         text: it.text,
-        state: it.kind === 'art' || it.kind === 'ph' ? 'neutral' : matchedItems.has(idx) ? 'match' : it.kind === 'opt' ? 'missing-opt' : 'missing',
+        state: it.kind === 'art' || it.kind === 'ph' || it.kind === 'to' ? 'neutral' : matchedItems.has(idx) ? 'match' : it.kind === 'opt' ? 'missing-opt' : 'missing',
       })),
     };
   }
@@ -224,8 +231,9 @@ const ExprCore = (() => {
   // Підказка з перших літер: «have an impact on something» → «h___ an i_____ on something».
   // Артиклі й заповнювачі (something, someone) лишаються як є.
   function hintPattern(expression) {
-    return String(expression ?? '').replace(/[A-Za-z][A-Za-z'’]*/g, w =>
-      ARTICLES.has(w.toLowerCase()) || PLACEHOLDERS.has(w.toLowerCase()) ? w : w[0] + '_'.repeat(w.length - 1));
+    return String(expression ?? '').replace(/[A-Za-z][A-Za-z'’]*/g, (w, at, all) =>
+      ARTICLES.has(w.toLowerCase()) || PLACEHOLDERS.has(w.toLowerCase()) || (w.toLowerCase() === 'to' && !all.slice(0, at).trim())
+        ? w : w[0] + '_'.repeat(w.length - 1));
   }
 
   // Кроки сесії. Нові вирази вчаться групами по groupSize: знайомство з усією групою →
@@ -321,6 +329,58 @@ const ExprCore = (() => {
       'вираз | результат | моя фраза',
       `де вираз — точно як у списку, результат — одне з: ${Object.values(REPORT_RESULTS).join(' / ')}, моя фраза — моє речення з цим виразом (якщо не вжито — порожньо).`,
     ].join('\n');
+  }
+
+  // ---------- промт для витягу виразів з уроку ----------
+  // variant 'uk': ситуації й образ українською; 'en': усе англійською, українською лише переклад у дужках.
+  function buildExtractPrompt({ text, variant = 'uk', level = 'B1', about = '', exclude = [] }) {
+    const en = variant === 'en';
+    const fields = en ? [
+      '1. вираз — англійською, у початковій формі, без "to". Замість конкретного об\'єкта пиши something / someone. Необов\'язкову частину бери в дужки: park something (for now).',
+      '2. значення — коротке пояснення англійською простими словами рівня B1, а в дужках переклад українською: "to put off a topic until later (відкласти питання)".',
+      '3. сфера — рівно одне слово: робота або життя.',
+      '4–6. ситуації — англійською, по одному реченню: обставини, в яких мені треба сказати цей вираз. Сам вираз і його слова в ситуації не вживай. Ситуації різні: різні люди, місця, причини. Якщо ситуацій дві, поле 6 лишай порожнім, але знаки | зберігай.',
+      '7. образ — англійською, буквальна картинка зі слів виразу, яку легко уявити ("pushing a document back across the table"). Якщо доброго образу немає, лиши поле порожнім.',
+    ] : [
+      '1. вираз — англійською, у початковій формі, без "to". Замість конкретного об\'єкта пиши something / someone. Необов\'язкову частину бери в дужки: park something (for now).',
+      '2. значення — українською, коротко, 2–6 слів.',
+      '3. сфера — рівно одне слово: робота або життя.',
+      '4–6. ситуації — українською, по одному реченню: обставини, в яких мені треба сказати цей вираз, а не дослівний переклад. Жодних англійських слів. Ситуації різні: різні люди, місця, причини. Якщо ситуацій дві, поле 6 лишай порожнім, але знаки | зберігай.',
+      '7. образ — українською, буквальна картинка зі слів виразу, яку легко уявити ("відштовхнути документ назад через стіл"). Якщо доброго образу немає, лиши поле порожнім.',
+    ];
+    const sample = en
+      ? 'push back on something | to disagree with a plan or request (заперечити) | робота | The developers think the deadline is unrealistic and say so | A client asks for a discount you cannot give | | pushing a document back across the table | The team pushed back on the deadline. |'
+      : 'push back on something | заперечити, не погодитися | робота | Розробники вважають дедлайн нереальним і кажуть про це | Клієнт вимагає знижку, яку ви не можете дати | | відштовхнути документ назад через стіл | The team pushed back on the deadline. |';
+    return [
+      `Я вивчаю англійську для роботи і для повсякденного життя. Мій рівень ${level}.`,
+      'Я впізнаю вирази, але не можу згадати їх у розмові, тому тренуюсь згадувати вираз за ситуацією.',
+      about.trim() ? `Про мене (для прикладів про роботу): ${about.trim()}` : '',
+      '',
+      'ЗАВДАННЯ',
+      `З тексту уроку нижче вибери 8–15 виразів, які варто вивчити на рівні ${level}: фразові дієслова, колокації, сталі звороти.`,
+      'Віддавай перевагу виразам з кількох слів; окреме слово бери лише тоді, коли воно справді важливе, і краще в типовому поєднанні (attribute something to something).',
+      'Пропусти слова, які на цьому рівні вже відомі, і рідкісні ідіоми.',
+      exclude.length ? `Не бери ці вирази, вони вже є в мене: ${exclude.join(', ')}.` : '',
+      '',
+      'ФОРМАТ ВІДПОВІДІ',
+      'Лише рядки у блоці коду, один вираз на рядок, без нумерації, заголовків і пояснень.',
+      'Кожен рядок має рівно 9 полів, розділених знаком |:',
+      'вираз | значення | сфера | ситуація 1 | ситуація 2 | ситуація 3 | образ | приклад | цитата',
+      '',
+      'Правила для полів:',
+      ...fields,
+      '8. приклад — одне коротке англійське речення з цим виразом: для сфери «робота» про мою роботу, для «життя» про побут.',
+      '9. цитата — точний фрагмент з уроку (до 15 слів), де трапився вираз. Якщо фрагмента немає, лиши поле порожнім.',
+      'Обов\'язкові поля 1, 2, 3, 4 і 8. Знак | всередині тексту заборонений.',
+      '',
+      'Приклад правильного рядка:',
+      sample,
+      '',
+      'Текст уроку:',
+      '"""',
+      String(text ?? '').trim(),
+      '"""',
+    ].filter((l, i, arr) => l !== '' || arr[i - 1] !== '').join('\n');
   }
 
   function parseResult(s) {
@@ -419,13 +479,22 @@ const ExprCore = (() => {
     const rows = [];
     String(text ?? '').split(/\r?\n/).forEach((raw, i) => {
       let line = raw.trim();
-      if (!line || /^[|\s:-]+$/.test(line)) return; // порожній рядок або роздільник markdown-таблиці
+      if (!line || /^[|\s:-]+$/.test(line) || /^(```|~~~)/.test(line)) return; // порожній рядок, роздільник таблиці, межа блоку коду
       line = line.replace(/^\|/, '').replace(/\|$/, '');
       const parts = line.split('|').map(s => s.trim());
       if (['expression', 'вираз'].includes(parts[0].toLowerCase())) return; // рядок заголовків
       const row = { line: i + 1, format: null, data: null, errors: [], warnings: [], duplicate: false };
       let required;
-      if (parts.length >= 8 && parts.length <= 9) {
+      // Без сфери: вираз | значення | ситуація 1 | ситуація 2 | ситуація 3 | образ | приклад | цитата.
+      // Третє поле тоді — ціле речення, а не одне слово «робота»/«життя».
+      const noDomain = (parts.length === 7 || parts.length === 8) && !parseDomain(parts[2]) && /\s/.test(parts[2]);
+      if (noDomain) {
+        const [expression, meaning_uk, c1, c2, c3, image_note, example_en, note = ''] = parts;
+        row.format = 'no-domain';
+        row.data = { expression, meaning_uk, domain: 'work', cues_uk: [c1, c2, c3].filter(Boolean), image_note, example_en, note };
+        row.warnings.push('Сферу не вказано: буде «робота» (змінити можна в картці)');
+        required = [['вираз', expression], ['значення', meaning_uk], ['ситуація 1', c1], ['приклад', example_en]];
+      } else if (parts.length >= 8 && parts.length <= 9) {
         const [expression, meaning_uk, dom, c1, c2, c3, image_note, example_en, note = ''] = parts;
         const domain = parseDomain(dom);
         row.format = 'new';
@@ -443,7 +512,7 @@ const ExprCore = (() => {
           row.errors.push('Забагато полів: можливо, знак | є всередині тексту');
         }
       }
-      const countOk = row.format === 'new' || (parts.length >= 4 && parts.length <= 5);
+      const countOk = row.format !== 'old' || (parts.length >= 4 && parts.length <= 5);
       const missing = required.filter(([, v]) => !v).map(([k]) => k);
       if (countOk && missing.length) row.errors.push('Порожні поля: ' + missing.join(', '));
       const { expression, cues_uk } = row.data;
@@ -518,7 +587,7 @@ const ExprCore = (() => {
     schedule, isNew, countDone, planDay, promote, checkMastered, applyUsage, makeExpression,
     pickCue, upgrade, parseDomain, parseImport, weeklyProgress, rolePlayPick,
     hintPattern, sessionSteps, choiceOptions,
-    REPORT_RESULTS, buildRolePlayPrompt, parseRolePlayReport,
+    REPORT_RESULTS, buildRolePlayPrompt, parseRolePlayReport, buildExtractPrompt,
   };
 })();
 
