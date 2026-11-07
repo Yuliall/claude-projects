@@ -509,7 +509,7 @@ test('імпорт: рядки без сфери (7 полів) і межі бл
   assert.equal(rows.length, 3, 'рядки ``` пропущено');
   assert.ok(rows.every(r => r.format === 'no-domain' && !r.errors.length && !r.duplicate), JSON.stringify(rows.map(r => r.errors)));
   assert.ok(rows.every(r => r.data.domain === 'work' && r.data.cues_uk.length === 3));
-  assert.match(rows[0].warnings.join(), /Сферу не вказано/);
+  assert.ok(!rows[0].warnings.some(w => /Сфер/.test(w)), 'без сфери — без попередження');
   assert.equal(rows[0].data.image_note, 'a sponge soaks up water, and the water becomes part of the sponge');
   assert.match(rows[0].data.example_en, /^It took me a year/);
 });
@@ -539,13 +539,20 @@ test('промт витягу: варіант з українськими сит
   assert.match(p, /"""\nLesson text here\n"""$/);
 });
 
-test('промт витягу: варіант без української, лише переклад у дужках', () => {
-  const p = X.buildExtractPrompt({ text: 'x', variant: 'en' });
-  assert.match(p, /ситуації — англійською/);
+test('промт для списку: картка на кожен пункт, без відбору і без сфери', () => {
+  const p = X.buildExtractPrompt({ text: 'internalize\ncoherent\ngo into a tailspin', variant: 'en' });
+  assert.match(p, /Зроби картку для кожного пункту списку/);
+  assert.match(p, /Нічого не пропускай і не додавай/);
+  assert.match(p, /рівно 7 полів/);
+  assert.match(p, /вираз \| значення \| ситуація 1 \| ситуація 2 \| ситуація 3 \| образ \| приклад/);
   assert.match(p, /в дужках переклад українською/);
-  assert.match(p, /образ — англійською/);
-  assert.doesNotMatch(p, /Про мене/);
+  assert.doesNotMatch(p, /сфер/i);
+  assert.doesNotMatch(p, /вибери|Пропусти|урок/i);
+  assert.match(p, /Мій список:\n"""\ninternalize\ncoherent\ngo into a tailspin\n"""$/);
   assert.doesNotMatch(p, /\n\n\n/);
-  const rows = X.parseImport(p.split('\n').find(l => l.startsWith('push back on something |')));
-  assert.deepEqual(rows[0].errors, [], 'приклад рядка в промті проходить імпорт');
+  const [row] = X.parseImport(p.split('\n').find(l => l.startsWith('push back on something |')));
+  assert.equal(row.format, 'no-domain');
+  assert.deepEqual(row.errors, [], 'приклад рядка в промті проходить імпорт');
+  assert.deepEqual(row.warnings, []);
+  assert.equal(row.data.cues_uk.length, 2);
 });
