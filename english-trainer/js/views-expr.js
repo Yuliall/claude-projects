@@ -81,7 +81,7 @@ Views.expr = async () => {
       <div class="btns">
         <a class="btn primary" href="#/expr-review" ${n ? '' : 'aria-disabled="true"'}>Повторити: ${n}</a>
         <a class="btn" href="#/roleplay">Рольова гра</a>
-        <a class="btn" href="#/expr-import">Імпорт</a>
+        <a class="btn" href="#/expr-import">Додати з уроку</a>
         <a class="btn" href="#/expr-progress">Прогрес</a>
       </div>
     </div>
@@ -469,19 +469,62 @@ function exprCard(t, el, onGrade) {
 
 // ---------- імпорт ----------
 
+const EXTRACT_KEY = 'et-expr-extract';
+const EXTRACT_VARIANTS = [
+  ['uk', 'З українською', 'Значення, ситуації й образ українською. Найкраще для згадування: бачиш ситуацію рідною мовою і шукаєш англійський вираз.'],
+  ['en', 'Без української, лише переклад', 'Пояснення, ситуації й образ англійською, українською лише переклад у дужках. Більше англійської на кожній картці.'],
+];
+function loadExtract() {
+  try { return { text: '', variant: 'uk', about: '', ...JSON.parse(localStorage.getItem(EXTRACT_KEY) || '{}') }; }
+  catch { return { text: '', variant: 'uk', about: '' }; }
+}
+function saveExtract(d) { try { localStorage.setItem(EXTRACT_KEY, JSON.stringify(d)); } catch {} }
+
 Views['expr-import'] = async () => {
-  const all = await loadExpressions();
+  const [all, s] = await Promise.all([loadExpressions(), getSettings()]);
+  const ex = loadExtract();
   app().innerHTML = `
     <div class="page-head"><div><a href="#/expr" class="crumb">Вирази</a><h1>Імпорт виразів</h1></div></div>
     <div class="panel stack">
+      <h3>1. Текст уроку → промт для Claude</h3>
+      <textarea id="lessonText" rows="8" placeholder="Вставте сюди текст уроку">${esc(ex.text)}</textarea>
+      <fieldset class="rp-set"><legend>Варіант карток</legend>${radioGroup('variant', EXTRACT_VARIANTS, ex.variant)}</fieldset>
+      <div class="toolbar">
+        <label>Рівень <select id="xLevel">${LEVELS.map(l => `<option ${l === (s.level || 'B1') ? 'selected' : ''}>${l}</option>`).join('')}</select></label>
+        <input id="about" placeholder="Про мене для прикладів: ким працюю, з ким спілкуюсь" value="${esc(ex.about)}">
+      </div>
+      <div class="btns">
+        <button class="btn primary" data-act="copyExtract">Скопіювати промт</button>
+        <a class="btn ghost" href="https://claude.ai/new" target="_blank" rel="noopener">Відкрити Claude</a>
+      </div>
+      <p class="muted small">Вирази, які вже є у вас (${all.length}), Claude попросять не брати. Відповідь Claude вставте в поле нижче.</p>
+    </div>
+    <div class="panel stack">
+      <h3>2. Відповідь Claude</h3>
       <p class="muted">Один вираз на рядок:<br>
         <code>вираз | значення | сфера (робота/життя) | ситуація 1 | ситуація 2 | ситуація 3 | образ | приклад англійською | цитата з уроку</code><br>
-        Ситуації 2 і 3, образ і цитата не обов'язкові, але їхні місця між знаками | треба лишити. Старий формат <code>вираз | значення | ситуація | приклад | цитата</code> теж підходить, сфера тоді «робота».</p>
+        Ситуації 2 і 3, образ і цитата не обов'язкові, але їхні місця між знаками | треба лишити. Підходять і рядки без сфери (тоді «робота»), і старий формат <code>вираз | значення | ситуація | приклад | цитата</code>. Рядки з <code>\`\`\`</code> пропускаються.</p>
       <textarea id="imp" rows="9" placeholder="push back on something | заперечити, не погодитися | робота | Розробники вважають дедлайн нереальним | Керівник додає функцію в повний спринт | | відштовхнути документ назад через стіл | The team pushed back on the deadline."></textarea>
       <label>Джерело: дата уроку або test<input id="src" value="${ExprCore.dayKey()}"></label>
       <div class="btns"><button class="btn primary" data-act="preview">Перевірити</button></div>
     </div>
     <div class="panel" id="prev" hidden></div>`;
+
+  const extractState = () => ({
+    text: $('#lessonText').value,
+    variant: $('input[name=variant]:checked').value,
+    about: $('#about').value,
+  });
+  $('#lessonText').oninput = () => saveExtract(extractState());
+  $('#about').oninput = () => saveExtract(extractState());
+  app().onchange = e => { if (e.target.name === 'variant') saveExtract(extractState()); };
+  actions.copyExtract = async () => {
+    const st = extractState();
+    if (!st.text.trim()) { toast('Спершу вставте текст уроку'); $('#lessonText').focus(); return; }
+    await copyText(ExprCore.buildExtractPrompt({ ...st, level: $('#xLevel').value, exclude: all.map(c => c.expression) }));
+    saveExtract(st);
+    toast('Промт скопійовано. Вставте його в чат із Claude.');
+  };
 
   let rows = [];
   actions.preview = () => {
@@ -515,6 +558,7 @@ Views['expr-import'] = async () => {
     const fresh = rows.filter(r => !r.errors.length && !r.duplicate).map((r, i) => ExprCore.makeExpression(r.data, source, now + i));
     await DB.putMany('expressions', fresh);
     await promoteQueue();
+    saveExtract({ ...loadExtract(), text: '' });
     const ids = new Set(fresh.map(c => c.id));
     const nowActive = (await loadExpressions()).filter(c => ids.has(c.id) && c.status === 'active').length;
     toast(`Додано ${fresh.length}: активних ${nowActive}, у черзі ${fresh.length - nowActive}`);

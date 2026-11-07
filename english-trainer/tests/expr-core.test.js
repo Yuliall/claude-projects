@@ -493,3 +493,59 @@ test('звіт рольової гри: помилки й дублі', () => {
   assert.equal(rows[3].duplicate, false);
   assert.equal(rows[3].result, 'unprompted');
 });
+
+// ---------- два варіанти: з українською і без ----------
+
+const USER_LINES = [
+  '```',
+  "to internalize | to absorb an idea, belief, value, or feeling so deeply that it becomes a natural part of your character, thinking, or behavior (засвоїти) | when a new rule or skill works automatically, without reminders | when someone starts accepting criticism or another person's opinion as the truth about themselves | when a team has adopted the company's values and acts on them without being told | a sponge soaks up water, and the water becomes part of the sponge | It took me a year to internalize the new reporting rules, but now I don't even check the manual. |",
+  'deliberate | 1) done on purpose, not by accident; 2) slow, careful, and unhurried in movement or thought (навмисний; неквапливий) | when you stress that a mistake was not accidental | when you describe someone who speaks slowly and thoughtfully | when you separate "it just happened" from "it was planned" | a person walking slowly and evenly, thinking about every step | It wasn\'t a mistake, it was a deliberate decision to delay the launch. |',
+  'to deliberate | to think carefully about all the pros, cons, or evidence before making a decision (зважувати, радитися) | when a team discusses a decision for a long time | when you take a long time choosing between two options | when a jury or committee confers | weighing scales where arguments are placed one by one | We deliberated for two hours before choosing the new vendor. |',
+  '```',
+].join('\n');
+
+test('імпорт: рядки без сфери (7 полів) і межі блоку коду ```', () => {
+  const rows = X.parseImport(USER_LINES);
+  assert.equal(rows.length, 3, 'рядки ``` пропущено');
+  assert.ok(rows.every(r => r.format === 'no-domain' && !r.errors.length && !r.duplicate), JSON.stringify(rows.map(r => r.errors)));
+  assert.ok(rows.every(r => r.data.domain === 'work' && r.data.cues_uk.length === 3));
+  assert.match(rows[0].warnings.join(), /Сферу не вказано/);
+  assert.equal(rows[0].data.image_note, 'a sponge soaks up water, and the water becomes part of the sponge');
+  assert.match(rows[0].data.example_en, /^It took me a year/);
+});
+
+test('імпорт: помилкова сфера одним словом лишається помилкою, а не формат без сфери', () => {
+  const [r] = X.parseImport('run errands | справи | дім | s1 | | | образ | I run errands.');
+  assert.match(r.errors.join(), /робота.*життя/);
+});
+
+test('початкове «to»: не обов\'язкове у відповіді, але відрізняє дієслово в дублях', () => {
+  assert.equal(X.compare('internalize', 'to internalize').suggestion, 'got');
+  assert.equal(X.compare('to internalize', 'to internalize').suggestion, 'got');
+  assert.equal(X.compare('to internalize', 'internalize').suggestion, 'got');
+  assert.notEqual(X.expressionKey('to deliberate'), X.expressionKey('deliberate'));
+  assert.equal(X.expressionKey('to tend to someone'), X.expressionKey('to tend to somebody'));
+  assert.equal(X.hintPattern('to internalize'), 'to i__________');
+  assert.equal(X.hintPattern('tend to someone'), 't___ t_ someone');
+});
+
+test('промт витягу: варіант з українськими ситуаціями', () => {
+  const p = X.buildExtractPrompt({ text: 'Lesson text here', variant: 'uk', about: 'менеджерка продукту', exclude: ['push back on something'] });
+  assert.match(p, /ситуації — українською/);
+  assert.match(p, /Жодних англійських слів/);
+  assert.match(p, /Про мене \(для прикладів про роботу\): менеджерка продукту/);
+  assert.match(p, /Не бери ці вирази, вони вже є в мене: push back on something/);
+  assert.match(p, /рівно 9 полів/);
+  assert.match(p, /"""\nLesson text here\n"""$/);
+});
+
+test('промт витягу: варіант без української, лише переклад у дужках', () => {
+  const p = X.buildExtractPrompt({ text: 'x', variant: 'en' });
+  assert.match(p, /ситуації — англійською/);
+  assert.match(p, /в дужках переклад українською/);
+  assert.match(p, /образ — англійською/);
+  assert.doesNotMatch(p, /Про мене/);
+  assert.doesNotMatch(p, /\n\n\n/);
+  const rows = X.parseImport(p.split('\n').find(l => l.startsWith('push back on something |')));
+  assert.deepEqual(rows[0].errors, [], 'приклад рядка в промті проходить імпорт');
+});
